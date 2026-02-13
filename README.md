@@ -15,9 +15,15 @@ Production-style application for estimating discharged blend composition from la
 - `src/dem_sim/io.py`: CSV input loading and output directory helpers.
 - `src/dem_sim/reporting.py`: summaries and output artifact writers.
 - `src/dem_sim/sample_data.py`: built-in sample dataset generator.
+- `src/dem_sim/synthetic.py`: synthetic dataset generation within malt COA ranges.
 - `src/dem_sim/cli.py`: command-line interface.
+- `src/dem_sim/web.py`: FastAPI app and API endpoints.
+- `src/dem_sim/ui/index.html`: web app shell.
+- `src/dem_sim/ui/styles.css`: responsive UI styling.
+- `src/dem_sim/ui/app.js`: frontend behavior and API integration.
 - `scripts/run_example.py`: script entrypoint using in-code example dataframes.
 - `tests/test_smoke.py`: smoke test over sample-data flow.
+- `tests/test_web_api.py`: web/API smoke coverage.
 - `Silo_discharge.ipynb`: original R&D notebook.
 
 ## Install
@@ -68,7 +74,7 @@ PYTHONPATH=src python -m dem_sim.web --host 127.0.0.1 --port 8000
 ```
 
 Open:
-- `http://127.0.0.1:8000/` (small web UI)
+- `http://127.0.0.1:8000/` (full web UI)
 - `http://127.0.0.1:8000/docs` (Swagger UI)
 
 Main endpoints:
@@ -76,6 +82,9 @@ Main endpoints:
 - `GET /api/sample`
 - `POST /api/validate`
 - `POST /api/run`
+- `POST /api/optimize` (searches discharge fractions toward target COA)
+  - Uses normalized weighted L2 objective (error scaled by COA parameter ranges)
+  - Returns best plan plus Top-5 candidate plans
 
 ## Input files
 Place these CSV files in the input directory:
@@ -88,4 +97,7 @@ Place these CSV files in the input directory:
 Generated in output directory:
 - `segment_contributions.csv`
 - `lot_contributions.csv`
+- `segment_state_ledger.csv` (initial/discharged/remaining per segment)
+- `lot_state_ledger.csv` (initial/discharged/remaining per lot per silo)
+- `silo_state_ledger.csv` (initial/discharged/remaining per silo)
 - `summary.json`

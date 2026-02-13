@@ -18,4 +18,6 @@ def test_sample_data_and_run_smoke() -> None:
 
         result = run_blend(inputs, RunConfig())
         assert result["total_discharged_mass_kg"] > 0
+        assert result["total_remaining_mass_kg"] >= 0
         assert not pd.isna(result["df_lot_contrib_all"]["discharged_mass_kg"]).any()
+        assert "remaining_mass_kg" in result["df_silo_state_ledger"].columns

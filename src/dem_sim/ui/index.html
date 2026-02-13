@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>DEM Blend Studio</title>
+  <link rel="stylesheet" href="/ui/styles.css" />
+</head>
+<body>
+  <div class="page">
+    <header class="hero">
+      <h1>DEM Blend Studio</h1>
+      <p>Upcoming lots, current silo state, simulation run, and post-run blend optimization.</p>
+      <div class="actions">
+        <button id="loadSampleBtn" class="btn">Load Sample</button>
+        <button id="validateBtn" class="btn btn-alt">Validate</button>
+        <button id="runBtn" class="btn btn-strong">Run Simulation</button>
+        <button id="optimizeBtn" class="btn btn-opt">Blend Optimize</button>
+      </div>
+    </header>
+
+    <main class="layout">
+      <section class="panel">
+        <div class="panel-title">Upcoming Lots</div>
+        <div id="upcomingLotsWrap"></div>
+        <div class="panel-title top-gap">Input Payload</div>
+        <textarea id="payload" spellcheck="false"></textarea>
+      </section>
+
+      <section class="panel">
+        <div class="panel-title">Silo State</div>
+        <div id="stateLedgerWrap"></div>
+        <div class="panel-title top-gap">Run Summary</div>
+        <div id="summaryCards" class="cards"></div>
+        <div class="panel-title top-gap">Per-Silo</div>
+        <div id="siloTableWrap"></div>
+        <div class="panel-title top-gap">Blend Optimization Target</div>
+        <div class="target-grid">
+          <label>Moisture <input id="t_moisture_pct" type="number" step="0.001" value="4.5" /></label>
+          <label>Fine Extract <input id="t_fine_extract_db_pct" type="number" step="0.001" value="81.8" /></label>
+          <label>Wort pH <input id="t_wort_pH" type="number" step="0.001" value="5.9" /></label>
+          <label>Diastatic Power <input id="t_diastatic_power_WK" type="number" step="0.001" value="330" /></label>
+          <label>Total Protein <input id="t_total_protein_pct" type="number" step="0.001" value="10.7" /></label>
+          <label>Wort Colour <input id="t_wort_colour_EBC" type="number" step="0.001" value="4.5" /></label>
+          <label>Iterations <input id="opt_iterations" type="number" step="1" value="120" /></label>
+        </div>
+        <div class="panel-title top-gap">Optimization Result</div>
+        <pre id="optOut"></pre>
+        <div class="panel-title top-gap">Response</div>
+        <pre id="rawOut"></pre>
+      </section>
+    </main>
+  </div>
+
+  <script src="/ui/app.js?v=2"></script>
+</body>
+</html>

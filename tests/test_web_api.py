@@ -12,6 +12,13 @@ def test_health_endpoint() -> None:
     assert res.json()["status"] == "ok"
 
 
+def test_root_ui_served() -> None:
+    client = TestClient(create_app())
+    res = client.get("/")
+    assert res.status_code == 200
+    assert "DEM Blend Studio" in res.text
+
+
 def test_sample_and_run_endpoint() -> None:
     client = TestClient(create_app())
     sample = client.get("/api/sample")
@@ -26,3 +33,22 @@ def test_sample_and_run_endpoint() -> None:
     assert run.status_code == 200
     data = run.json()
     assert data["total_discharged_mass_kg"] > 0
+
+
+def test_optimize_endpoint() -> None:
+    client = TestClient(create_app())
+    payload = client.get("/api/sample").json()
+    payload["target_params"] = {
+        "moisture_pct": 4.5,
+        "fine_extract_db_pct": 81.8,
+    }
+    payload["iterations"] = 5
+    payload["seed"] = 7
+
+    res = client.post("/api/optimize", json=payload)
+    assert res.status_code == 200
+    data = res.json()
+    assert "recommended_discharge" in data
+    assert data["objective_method"] == "normalized_weighted_l2"
+    assert len(data["top_candidates"]) >= 1
+    assert data["best_run"]["total_discharged_mass_kg"] > 0

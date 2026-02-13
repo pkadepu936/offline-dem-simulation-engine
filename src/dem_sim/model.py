@@ -5,6 +5,7 @@ from math import erf, pi, sqrt
 from typing import Dict
 import warnings
 
+import numpy as np
 import pandas as pd
 
 
@@ -38,6 +39,21 @@ def normal_cdf(x: float) -> float:
     return 0.5 * (1.0 + erf(x / sqrt(2.0)))
 
 
+def _normal_cdf_array(x: np.ndarray) -> np.ndarray:
+    # Vectorized erf approximation (Abramowitz-Stegun 7.1.26) for fast hot-loop CDF.
+    z = x / sqrt(2.0)
+    sign = np.sign(z)
+    a = np.abs(z)
+    t = 1.0 / (1.0 + 0.3275911 * a)
+    poly = (
+        (((((1.061405429 * t) - 1.453152027) * t) + 1.421413741) * t - 0.284496736)
+        * t
+        + 0.254829592
+    ) * t
+    erf_approx = sign * (1.0 - poly * np.exp(-(a * a)))
+    return 0.5 * (1.0 + erf_approx)
+
+
 def _build_silo_map(df_silos: pd.DataFrame) -> Dict[str, Silo]:
     required = {"silo_id", "capacity_kg", "body_diameter_m", "outlet_diameter_m"}
     missing = required - set(df_silos.columns)
@@ -51,12 +67,24 @@ def _build_silo_map(df_silos: pd.DataFrame) -> Dict[str, Silo]:
     silos: Dict[str, Silo] = {}
     for _, r in d.iterrows():
         silo_id = str(r["silo_id"])
+        capacity_kg = float(r["capacity_kg"])
+        body_diameter_m = float(r["body_diameter_m"])
+        outlet_diameter_m = float(r["outlet_diameter_m"])
+        initial_mass_kg = float(r["initial_mass_kg"])
+        if capacity_kg <= 0:
+            raise ValueError(f"Silo {silo_id}: capacity_kg must be > 0.")
+        if body_diameter_m <= 0:
+            raise ValueError(f"Silo {silo_id}: body_diameter_m must be > 0.")
+        if outlet_diameter_m <= 0:
+            raise ValueError(f"Silo {silo_id}: outlet_diameter_m must be > 0.")
+        if initial_mass_kg < 0:
+            raise ValueError(f"Silo {silo_id}: initial_mass_kg cannot be negative.")
         silos[silo_id] = Silo(
             silo_id=silo_id,
-            capacity_kg=float(r["capacity_kg"]),
-            body_diameter_m=float(r["body_diameter_m"]),
-            outlet_diameter_m=float(r["outlet_diameter_m"]),
-            initial_mass_kg=float(r["initial_mass_kg"]),
+            capacity_kg=capacity_kg,
+            body_diameter_m=body_diameter_m,
+            outlet_diameter_m=outlet_diameter_m,
+            initial_mass_kg=initial_mass_kg,
         )
     return silos
 
@@ -171,7 +199,12 @@ def _resolve_discharge_mass_kg(
     if has_mass:
         m_kg = float(row["discharge_mass_kg"])
     elif has_frac:
-        m_kg = float(row["discharge_fraction"]) * total_mass_kg
+        frac = float(row["discharge_fraction"])
+        if frac < 0 or frac > 1:
+            raise ValueError(
+                f"Silo {silo_id}: discharge_fraction must be between 0 and 1. Got {frac:.6f}."
+            )
+        m_kg = frac * total_mass_kg
     else:
         raise ValueError(f"Silo {silo_id}: provide discharge_mass_kg or discharge_fraction.")
 
@@ -194,6 +227,13 @@ def _simulate_for_sigma(
     sigma_m: float,
     steps: int,
 ) -> pd.DataFrame:
+    if steps <= 0:
+        raise ValueError("steps must be > 0.")
+    if m_dot_kg_s <= 0:
+        raise ValueError("m_dot_kg_s must be > 0.")
+    if sigma_m <= 0:
+        raise ValueError("sigma_m must be > 0.")
+
     seg = intervals_df.copy()
     seg["discharged_mass_kg"] = 0.0
     if discharge_mass_kg == 0:
@@ -203,17 +243,32 @@ def _simulate_for_sigma(
     dt = discharge_time_s / steps
     dm = m_dot_kg_s * dt
     area = silo.cross_section_area_m2
+    z0 = seg["z0_m"].to_numpy(dtype=float)
+    z1 = seg["z1_m"].to_numpy(dtype=float)
+    discharged = np.zeros_like(z0, dtype=float)
 
     for i in range(steps):
         t_mid = (i + 0.5) * dt
         m_removed = min(discharge_mass_kg, m_dot_kg_s * t_mid)
         z_front = m_removed / (material.rho_bulk_kg_m3 * area)
-        p = layer_probabilities(z_front, sigma_m, seg, total_height_m)
-        seg["discharged_mass_kg"] += dm * p.values
+        denom = normal_cdf((total_height_m - z_front) / sigma_m) - normal_cdf(
+            (0.0 - z_front) / sigma_m
+        )
+        if denom <= 1e-15:
+            continue
+        p_raw = (
+            _normal_cdf_array((z1 - z_front) / sigma_m)
+            - _normal_cdf_array((z0 - z_front) / sigma_m)
+        ) / denom
+        p_raw = np.clip(p_raw, a_min=0.0, a_max=None)
+        s = float(p_raw.sum())
+        if s > 0:
+            discharged += dm * (p_raw / s)
 
-    total_sim = float(seg["discharged_mass_kg"].sum())
+    total_sim = float(discharged.sum())
     if total_sim > 0:
-        seg["discharged_mass_kg"] *= discharge_mass_kg / total_sim
+        discharged *= discharge_mass_kg / total_sim
+    seg["discharged_mass_kg"] = discharged
     return seg
 
 
@@ -228,6 +283,13 @@ def estimate_discharge_contrib_for_silo(
     auto_adjust: bool = False,
     min_nonzero_mass_kg: float = 1e-3,
 ) -> Dict[str, object]:
+    if sigma_m <= 0:
+        raise ValueError("sigma_m must be > 0.")
+    if steps <= 0:
+        raise ValueError("steps must be > 0.")
+    if min_nonzero_mass_kg < 0:
+        raise ValueError("min_nonzero_mass_kg must be >= 0.")
+
     intervals_df, total_height_m = build_intervals_from_df_layers(
         silo.silo_id, df_layers, silo, material
     )
@@ -342,6 +404,21 @@ def run_multi_silo_blend(
     steps: int = 2000,
     auto_adjust: bool = False,
 ) -> Dict[str, object]:
+    if sigma_m <= 0:
+        raise ValueError("sigma_m must be > 0.")
+    if steps <= 0:
+        raise ValueError("steps must be > 0.")
+    if material.rho_bulk_kg_m3 <= 0:
+        raise ValueError("material.rho_bulk_kg_m3 must be > 0.")
+    if material.grain_diameter_m <= 0:
+        raise ValueError("material.grain_diameter_m must be > 0.")
+    if bev.C <= 0:
+        raise ValueError("beverloo C must be > 0.")
+    if bev.k < 0:
+        raise ValueError("beverloo k must be >= 0.")
+    if bev.g_m_s2 <= 0:
+        raise ValueError("beverloo gravity must be > 0.")
+
     if "silo_id" not in df_discharge.columns:
         raise ValueError("df_discharge must include 'silo_id' column.")
 
@@ -377,11 +454,43 @@ def run_multi_silo_blend(
     df_segment_contrib_all = pd.concat(all_segment_contrib, ignore_index=True)
     df_lot_contrib_all = pd.concat(all_lot_contrib, ignore_index=True)
     total_blended_params = blend_params_from_contrib(df_lot_contrib_all, df_suppliers)
+    df_segment_state_ledger = df_segment_contrib_all.copy()
+    df_segment_state_ledger["remaining_mass_kg"] = (
+        df_segment_state_ledger["segment_mass_kg"].astype(float)
+        - df_segment_state_ledger["discharged_mass_kg"].astype(float)
+    ).clip(lower=0.0)
+
+    df_silo_state_ledger = (
+        df_segment_state_ledger.groupby("silo_id", as_index=False)[
+            ["segment_mass_kg", "discharged_mass_kg", "remaining_mass_kg"]
+        ]
+        .sum()
+        .rename(columns={"segment_mass_kg": "initial_mass_kg"})
+    )
+    df_silo_state_ledger["remaining_pct"] = (
+        100.0
+        * df_silo_state_ledger["remaining_mass_kg"]
+        / df_silo_state_ledger["initial_mass_kg"]
+    )
+
+    df_lot_state_ledger = (
+        df_segment_state_ledger.groupby(
+            ["silo_id", "lot_id", "supplier"], as_index=False
+        )[["segment_mass_kg", "discharged_mass_kg", "remaining_mass_kg"]]
+        .sum()
+        .rename(columns={"segment_mass_kg": "initial_mass_kg"})
+        .sort_values(["silo_id", "lot_id"])
+        .reset_index(drop=True)
+    )
 
     return {
         "per_silo": per_silo_results,
         "df_segment_contrib_all": df_segment_contrib_all,
         "df_lot_contrib_all": df_lot_contrib_all,
+        "df_silo_state_ledger": df_silo_state_ledger,
+        "df_lot_state_ledger": df_lot_state_ledger,
+        "df_segment_state_ledger": df_segment_state_ledger,
         "total_discharged_mass_kg": total_discharged,
+        "total_remaining_mass_kg": float(df_silo_state_ledger["remaining_mass_kg"].sum()),
         "total_blended_params": total_blended_params,
     }
