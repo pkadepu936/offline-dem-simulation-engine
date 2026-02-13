@@ -57,6 +57,11 @@ Run simulation:
 dem-sim run --in data/sample --out outputs/latest --auto-adjust
 ```
 
+`--steps` guidance (trade-off between speed and smoothness):
+- `400-800`: quick exploratory runs
+- `1200-2000`: default production-style planning (good balance)
+- `3000+`: high-fidelity sensitivity checks (slower)
+
 Run without installing as a script:
 ```bash
 PYTHONPATH=src python -m dem_sim run --in data/sample --out outputs/latest --auto-adjust
@@ -77,6 +82,23 @@ Open:
 - `http://127.0.0.1:8000/` (full web UI)
 - `http://127.0.0.1:8000/docs` (Swagger UI)
 
+### UI quick start (operator flow)
+1. `Load Sample`
+2. `Validate Inputs`
+3. `Run Simulation`
+4. Configure optimization target + preset/iterations/seed
+5. `Optimize Blend`
+6. Review:
+- KPI strip
+- Top candidates
+- What changed
+- Scenario compare
+- Explainability and convergence snapshot
+
+Keyboard shortcuts:
+- `Ctrl/Cmd + Enter`: run simulation
+- `Ctrl/Cmd + Shift + O`: optimize blend
+
 Main endpoints:
 - `GET /health`
 - `GET /api/sample`
@@ -84,6 +106,7 @@ Main endpoints:
 - `POST /api/run`
 - `POST /api/optimize` (searches discharge fractions toward target COA)
   - Uses normalized weighted L2 objective (error scaled by COA parameter ranges)
+  - Search strategy: stratified exploration + local refinement around current best
   - Returns best plan plus Top-5 candidate plans
 
 ## Input files
@@ -101,3 +124,12 @@ Generated in output directory:
 - `lot_state_ledger.csv` (initial/discharged/remaining per lot per silo)
 - `silo_state_ledger.csv` (initial/discharged/remaining per silo)
 - `summary.json`
+
+## UX metric targets
+- Time to first valid run: `<= 180s`
+- Validation issue identification: `<= 10s` median
+- Optimize decision time: `<= 20s` median
+- Run failure rate: `< 2%`
+- Optimize failure rate: `< 3%`
+
+See `docs/ui-ux-m8-handoff.md` for rollout checklist and metric definitions.

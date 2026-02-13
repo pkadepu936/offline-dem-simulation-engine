@@ -7,51 +7,148 @@
   <link rel="stylesheet" href="/ui/styles.css" />
 </head>
 <body>
+  <a class="skip-link" href="#mainContent">Skip to Main Content</a>
   <div class="page">
-    <header class="hero">
-      <h1>DEM Blend Studio</h1>
-      <p>Upcoming lots, current silo state, simulation run, and post-run blend optimization.</p>
+    <header class="app-head">
+      <div>
+        <h1>DEM Blend Studio</h1>
+        <p>Plan silo discharge, validate data health, run simulation, and optimize target blend.</p>
+      </div>
       <div class="actions">
         <button id="loadSampleBtn" class="btn">Load Sample</button>
-        <button id="validateBtn" class="btn btn-alt">Validate</button>
+        <button id="validateBtn" class="btn btn-alt">Validate Inputs</button>
         <button id="runBtn" class="btn btn-strong">Run Simulation</button>
-        <button id="optimizeBtn" class="btn btn-opt">Blend Optimize</button>
+        <button id="optimizeBtn" class="btn btn-opt">Optimize Blend</button>
       </div>
     </header>
 
-    <main class="layout">
-      <section class="panel">
-        <div class="panel-title">Upcoming Lots</div>
-        <div id="upcomingLotsWrap"></div>
-        <div class="panel-title top-gap">Input Payload</div>
-        <textarea id="payload" spellcheck="false"></textarea>
+    <section class="kpi-strip">
+      <article class="kpi-card">
+        <div class="kpi-key">Validation</div>
+        <div class="kpi-value" id="kpiValidation">Not Checked</div>
+      </article>
+      <article class="kpi-card">
+        <div class="kpi-key">Discharged (kg)</div>
+        <div class="kpi-value" id="kpiDischarged">0.000</div>
+      </article>
+      <article class="kpi-card">
+        <div class="kpi-key">Remaining (kg)</div>
+        <div class="kpi-value" id="kpiRemaining">0.000</div>
+      </article>
+      <article class="kpi-card">
+        <div class="kpi-key">Objective Score</div>
+        <div class="kpi-value" id="kpiObjective">N/A</div>
+      </article>
+    </section>
+
+    <main class="layout" id="mainContent">
+      <section class="workflow-col">
+        <article class="step-card" id="stepInput" aria-labelledby="stepInputTitle">
+          <div class="step-head">
+            <div class="step-index">1</div>
+            <div>
+              <div class="step-title" id="stepInputTitle">Input and Validation</div>
+              <div class="step-status" id="statusInput" aria-live="polite">Pending</div>
+            </div>
+          </div>
+          <div class="panel-title">Upcoming Lots</div>
+          <div id="upcomingLotsWrap"></div>
+          <div class="panel-title top-gap">Validation Result</div>
+          <div id="validationSummary" class="validation-summary" role="status" aria-live="polite">Run validation to check readiness.</div>
+          <div id="validationOut" class="validation-list" role="region" aria-label="Validation Issues"></div>
+        </article>
+
+        <article class="step-card" id="stepRun" aria-labelledby="stepRunTitle">
+          <div class="step-head">
+            <div class="step-index">2</div>
+            <div>
+              <div class="step-title" id="stepRunTitle">Simulation Controls and Run</div>
+              <div class="step-status" id="statusRun" aria-live="polite">Pending</div>
+            </div>
+          </div>
+          <div class="panel-title">Input Payload</div>
+          <textarea id="payload" spellcheck="false" aria-label="Input Payload JSON"></textarea>
+        </article>
       </section>
 
-      <section class="panel">
-        <div class="panel-title">Silo State</div>
-        <div id="stateLedgerWrap"></div>
-        <div class="panel-title top-gap">Run Summary</div>
-        <div id="summaryCards" class="cards"></div>
-        <div class="panel-title top-gap">Per-Silo</div>
-        <div id="siloTableWrap"></div>
-        <div class="panel-title top-gap">Blend Optimization Target</div>
-        <div class="target-grid">
-          <label>Moisture <input id="t_moisture_pct" type="number" step="0.001" value="4.5" /></label>
-          <label>Fine Extract <input id="t_fine_extract_db_pct" type="number" step="0.001" value="81.8" /></label>
-          <label>Wort pH <input id="t_wort_pH" type="number" step="0.001" value="5.9" /></label>
-          <label>Diastatic Power <input id="t_diastatic_power_WK" type="number" step="0.001" value="330" /></label>
-          <label>Total Protein <input id="t_total_protein_pct" type="number" step="0.001" value="10.7" /></label>
-          <label>Wort Colour <input id="t_wort_colour_EBC" type="number" step="0.001" value="4.5" /></label>
-          <label>Iterations <input id="opt_iterations" type="number" step="1" value="120" /></label>
-        </div>
-        <div class="panel-title top-gap">Optimization Result</div>
-        <pre id="optOut"></pre>
-        <div class="panel-title top-gap">Response</div>
-        <pre id="rawOut"></pre>
+      <section class="analysis-col">
+        <article class="step-card" id="stepResults" aria-labelledby="stepResultsTitle">
+          <div class="step-head">
+            <div class="step-index">3</div>
+            <div>
+              <div class="step-title" id="stepResultsTitle">Results Analysis</div>
+              <div class="step-status" id="statusResults" aria-live="polite">Pending</div>
+            </div>
+          </div>
+          <div class="panel-title">Run Summary</div>
+          <div id="runStatus" class="run-status" role="status" aria-live="polite">Simulation not started.</div>
+          <div id="summaryCards" class="cards"></div>
+          <div class="panel-title top-gap">Remaining Mass Focus</div>
+          <div id="remainingFocusWrap" class="viz-grid"></div>
+          <div class="panel-title top-gap">Discharge Contribution by Silo</div>
+          <div id="contributionWrap" class="bar-stack"></div>
+          <div class="panel-title top-gap">Silo State</div>
+          <div id="stateLedgerWrap"></div>
+          <div class="panel-title top-gap">Per-Silo</div>
+          <div id="siloTableWrap"></div>
+        </article>
+
+        <article class="step-card" id="stepOptimize" aria-labelledby="stepOptimizeTitle">
+          <div class="step-head">
+            <div class="step-index">4</div>
+            <div>
+              <div class="step-title" id="stepOptimizeTitle">Optimization Workbench</div>
+              <div class="step-status" id="statusOptimize" aria-live="polite">Pending</div>
+            </div>
+          </div>
+          <div class="panel-title">Blend Optimization Target</div>
+          <div class="target-grid">
+            <label>Moisture <input id="t_moisture_pct" type="number" step="0.001" value="4.5" /></label>
+            <label>Fine Extract <input id="t_fine_extract_db_pct" type="number" step="0.001" value="81.8" /></label>
+            <label>Wort pH <input id="t_wort_pH" type="number" step="0.001" value="5.9" /></label>
+            <label>Diastatic Power <input id="t_diastatic_power_WK" type="number" step="0.001" value="330" /></label>
+            <label>Total Protein <input id="t_total_protein_pct" type="number" step="0.001" value="10.7" /></label>
+            <label>Wort Colour <input id="t_wort_colour_EBC" type="number" step="0.001" value="4.5" /></label>
+            <label>Search Preset
+              <select id="opt_preset">
+                <option value="fast">Fast</option>
+                <option value="balanced" selected>Balanced</option>
+                <option value="aggressive">Aggressive</option>
+              </select>
+            </label>
+            <label>Iterations <input id="opt_iterations" type="number" step="1" value="120" /></label>
+            <label>Seed <input id="opt_seed" type="number" step="1" value="42" /></label>
+          </div>
+          <div class="panel-title top-gap">Top Candidates</div>
+          <div id="candidateControls" class="candidate-controls">
+            <label>Sort by
+              <select id="candidateSort">
+                <option value="score" selected>Objective Score</option>
+                <option value="discharged">Discharged Mass</option>
+              </select>
+            </label>
+          </div>
+          <div id="candidateTableWrap"></div>
+          <div class="panel-title top-gap">What Changed</div>
+          <div id="changeSummaryWrap" class="change-summary"></div>
+          <div class="panel-title top-gap">Scenario Compare</div>
+          <div id="scenarioCompareWrap" class="compare-grid"></div>
+          <div class="panel-title top-gap">Explainability</div>
+          <div id="explainabilityWrap" class="explain-card"></div>
+          <div class="panel-title top-gap">Convergence Snapshot</div>
+          <div id="convergenceWrap" class="convergence-card"></div>
+          <div class="panel-title top-gap">Optimization Result</div>
+          <pre id="optOut" role="region" aria-label="Optimization Output"></pre>
+        </article>
+
+        <details class="advanced">
+          <summary>Advanced / Raw Response</summary>
+          <pre id="rawOut" role="region" aria-label="Raw API Response"></pre>
+        </details>
       </section>
     </main>
   </div>
 
-  <script src="/ui/app.js?v=2"></script>
+  <script src="/ui/app.js?v=3"></script>
 </body>
 </html>

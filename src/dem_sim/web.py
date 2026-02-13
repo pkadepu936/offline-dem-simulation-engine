@@ -97,6 +97,8 @@ DEFAULT_PARAM_RANGES = {
     "total_protein_pct": 11.2 - 10.2,
     "wort_colour_EBC": 4.7 - 4.3,
 }
+DISCHARGE_FRACTION_MIN = 0.2
+DISCHARGE_FRACTION_MAX = 0.8
 
 
 def _score_blend(
@@ -112,6 +114,23 @@ def _score_blend(
             scale = 1.0
         score += ((a - float(t)) / scale) ** 2
     return score
+
+
+def _clip_fraction(v: float) -> float:
+    return max(DISCHARGE_FRACTION_MIN, min(DISCHARGE_FRACTION_MAX, float(v)))
+
+
+def _candidate_rows_from_fractions(
+    silo_ids: list[str], fractions: list[float]
+) -> list[dict[str, Any]]:
+    return [
+        {
+            "silo_id": silo_id,
+            "discharge_mass_kg": None,
+            "discharge_fraction": round(_clip_fraction(frac), 4),
+        }
+        for silo_id, frac in zip(silo_ids, fractions)
+    ]
 
 
 def create_app() -> FastAPI:
@@ -170,22 +189,20 @@ def create_app() -> FastAPI:
 
         cfg = RunConfig(**req.config)
         silos_df = inputs["silos"].copy()
+        silo_ids = silos_df["silo_id"].astype(str).tolist()
         rng = random.Random(req.seed)
+        total_iter = max(1, req.iterations)
+        explore_iters = max(1, int(total_iter * 0.6))
+        exploit_iters = total_iter - explore_iters
         best_score = float("inf")
         best_result: dict[str, Any] | None = None
         best_discharge: list[dict[str, Any]] = []
         top_candidates: list[dict[str, Any]] = []
+        best_fractions: list[float] = []
 
-        for _ in range(max(1, req.iterations)):
-            candidate_rows = []
-            for silo_id in silos_df["silo_id"].astype(str):
-                candidate_rows.append(
-                    {
-                        "silo_id": silo_id,
-                        "discharge_mass_kg": None,
-                        "discharge_fraction": round(rng.uniform(0.2, 0.8), 4),
-                    }
-                )
+        def evaluate_fractions(fracs: list[float]) -> None:
+            nonlocal best_score, best_result, best_discharge, best_fractions
+            candidate_rows = _candidate_rows_from_fractions(silo_ids, fracs)
             candidate_inputs = dict(inputs)
             candidate_inputs["discharge"] = pd.DataFrame(candidate_rows)
             result = run_blend(candidate_inputs, cfg)
@@ -207,6 +224,28 @@ def create_app() -> FastAPI:
                 best_score = score
                 best_result = result
                 best_discharge = candidate_rows
+                best_fractions = [float(c["discharge_fraction"]) for c in candidate_rows]
+
+        # Explore: stratified random sampling in [0.2, 0.8] to improve coverage.
+        for i in range(explore_iters):
+            band_lo = DISCHARGE_FRACTION_MIN + (
+                (DISCHARGE_FRACTION_MAX - DISCHARGE_FRACTION_MIN) * i / explore_iters
+            )
+            band_hi = DISCHARGE_FRACTION_MIN + (
+                (DISCHARGE_FRACTION_MAX - DISCHARGE_FRACTION_MIN) * (i + 1) / explore_iters
+            )
+            fractions = [rng.uniform(band_lo, band_hi) for _ in silo_ids]
+            rng.shuffle(fractions)
+            evaluate_fractions(fractions)
+
+        # Exploit: local perturbation around the current best solution.
+        if not best_fractions:
+            best_fractions = [0.5 for _ in silo_ids]
+        for i in range(exploit_iters):
+            anneal = 1.0 - (i / max(1, exploit_iters))
+            step = 0.12 * anneal + 0.01
+            trial = [_clip_fraction(f + rng.uniform(-step, step)) for f in best_fractions]
+            evaluate_fractions(trial)
 
         if best_result is None:
             raise HTTPException(status_code=500, detail="Optimization failed.")
@@ -218,7 +257,7 @@ def create_app() -> FastAPI:
             "best_run": _result_to_api_payload(best_result),
             "target_params": req.target_params,
             "iterations": req.iterations,
-            "objective_method": "normalized_weighted_l2",
+            "objective_method": "normalized_weighted_l2_hybrid_search",
             "param_ranges": DEFAULT_PARAM_RANGES,
             "top_candidates": top_candidates,
         }

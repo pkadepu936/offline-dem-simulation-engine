@@ -49,6 +49,6 @@ def test_optimize_endpoint() -> None:
     assert res.status_code == 200
     data = res.json()
     assert "recommended_discharge" in data
-    assert data["objective_method"] == "normalized_weighted_l2"
+    assert data["objective_method"] == "normalized_weighted_l2_hybrid_search"
     assert len(data["top_candidates"]) >= 1
     assert data["best_run"]["total_discharged_mass_kg"] > 0
