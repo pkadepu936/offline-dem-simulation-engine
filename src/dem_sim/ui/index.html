@@ -53,6 +53,16 @@
           </div>
           <div class="panel-title">Upcoming Lots</div>
           <div id="upcomingLotsWrap"></div>
+          <div id="assumptionNote" class="top-gap"></div>
+          <div class="panel-title top-gap">Whole-Lot Assumptions</div>
+          <div class="target-grid">
+            <label>Lot Size (kg) <input id="lotSizeKg" type="number" step="1" value="2000" /></label>
+            <label>Silo Slot Count <input id="siloSlotCount" type="number" step="1" value="4" /></label>
+            <label>Incoming Lots <input id="incomingLotsCount" type="number" step="1" value="100" /></label>
+          </div>
+          <div class="top-gap">
+            <button id="applyWholeLotBtn" class="btn btn-alt">Apply Whole-Lot Policy</button>
+          </div>
           <div class="panel-title top-gap">Validation Result</div>
           <div id="validationSummary" class="validation-summary" role="status" aria-live="polite">Run validation to check readiness.</div>
           <div id="validationOut" class="validation-list" role="region" aria-label="Validation Issues"></div>
@@ -87,8 +97,7 @@
           <div id="remainingFocusWrap" class="viz-grid"></div>
           <div class="panel-title top-gap">Discharge Contribution by Silo</div>
           <div id="contributionWrap" class="bar-stack"></div>
-          <div class="panel-title top-gap">Silo State</div>
-          <div id="stateLedgerWrap"></div>
+          <div id="stateLedgerWrap" style="display:none;"></div>
           <div class="panel-title top-gap">Per-Silo</div>
           <div id="siloTableWrap"></div>
         </article>
@@ -120,6 +129,9 @@
             <label>Seed <input id="opt_seed" type="number" step="1" value="42" /></label>
           </div>
           <div class="panel-title top-gap">Top Candidates</div>
+          <div class="top-gap">
+            <button id="applyDischargeBtn" class="btn btn-alt">Apply Discharge (Best Candidate)</button>
+          </div>
           <div id="candidateControls" class="candidate-controls">
             <label>Sort by
               <select id="candidateSort">
@@ -149,6 +161,6 @@
     </main>
   </div>
 
-  <script src="/ui/app.js?v=3"></script>
+  <script src="/ui/app.js?v=4"></script>
 </body>
 </html>

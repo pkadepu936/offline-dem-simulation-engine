@@ -20,6 +20,7 @@ const optSeedEl = document.getElementById("opt_seed");
 const candidateSortEl = document.getElementById("candidateSort");
 const optimizeBtn = document.getElementById("optimizeBtn");
 const runBtn = document.getElementById("runBtn");
+const applyDischargeBtn = document.getElementById("applyDischargeBtn");
 
 const kpiValidationEl = document.getElementById("kpiValidation");
 const kpiDischargedEl = document.getElementById("kpiDischarged");
@@ -187,6 +188,50 @@ function renderSiloTable(result) {
   `;
 }
 
+function renderSiloFillTable(summary) {
+  const rows = (summary?.silos || [])
+    .map(
+      (s) => {
+        const lotDisplay = (s.lots || [])
+          .filter((l) => Number(l.remaining_mass_kg || 0) > 0.5)
+          .map(
+            (l) =>
+              `${Number(l.layer_index || 0)}:${String(l.lot_id || "")}(${Number(
+                l.remaining_mass_kg || 0
+              ).toFixed(0)})`
+          )
+          .join(" | ");
+        return `
+    <tr>
+      <td>${s.silo_id}</td>
+      <td>${Number(s.capacity_kg || 0).toFixed(3)}</td>
+      <td>${Number(s.used_kg || 0).toFixed(3)}</td>
+      <td>${Number(s.remaining_kg || 0).toFixed(3)}</td>
+      <td>${Number(s.remaining_pct || 0).toFixed(2)}</td>
+      <td>${lotDisplay}</td>
+    </tr>
+  `;
+      }
+    )
+    .join("");
+
+  siloTableWrapEl.innerHTML = `
+    <table>
+      <thead>
+        <tr>
+          <th>Silo</th>
+          <th>Capacity (kg)</th>
+          <th>Used (kg)</th>
+          <th>Remaining (kg)</th>
+          <th>Remaining (%)</th>
+          <th>Lots (bottom-&gt;top)</th>
+        </tr>
+      </thead>
+      <tbody>${rows}</tbody>
+    </table>
+  `;
+}
+
 function renderUpcomingLots(payload) {
   const layers = payload.layers || [];
   const map = new Map();
@@ -303,6 +348,7 @@ function renderCandidateTable(payload) {
       <td>${Number(c.objective_score).toFixed(6)}</td>
       <td>${Number(c.total_discharged_mass_kg).toFixed(3)}</td>
       <td>${(c.recommended_discharge || []).map((r) => `${r.silo_id}:${Number(r.discharge_fraction).toFixed(3)}`).join(" | ")}</td>
+      <td><button class="btn btn-alt candidate-discharge-btn" data-candidate-index="${idx}">Discharge</button></td>
     </tr>
   `
     )
@@ -315,6 +361,7 @@ function renderCandidateTable(payload) {
           <th>Score</th>
           <th>Discharged (kg)</th>
           <th>Recommended Fractions</th>
+          <th>Action</th>
         </tr>
       </thead>
       <tbody>${rows}</tbody>
@@ -443,11 +490,32 @@ async function loadSample() {
   printRaw("Sample loaded.");
 }
 
+function scheduleInitialSampleLoad() {
+  const startLoad = () => {
+    loadSample().catch((e) => {
+      printRaw(`Sample load error: ${String(e)}`);
+    });
+  };
+  if (typeof window !== "undefined" && typeof window.requestIdleCallback === "function") {
+    window.requestIdleCallback(startLoad, { timeout: 500 });
+    return;
+  }
+  setTimeout(startLoad, 0);
+}
+
 function parsePayload() {
   try {
     return JSON.parse(payloadEl.value);
   } catch (e) {
     throw new Error(`Invalid JSON: ${e.message}`);
+  }
+}
+
+function safePayloadOrEmpty() {
+  try {
+    return parsePayload();
+  } catch (_) {
+    return {};
   }
 }
 
@@ -492,12 +560,17 @@ async function runSimulation() {
     stepResults.setAttribute("aria-busy", "true");
     setStepState(stepRun, statusRun, "is-active", "Running");
     runStatusEl.className = "run-status running";
-    runStatusEl.textContent = "Simulation is running...";
+    runStatusEl.textContent = "Filling silos from incoming queue...";
     const payload = parsePayload();
-    const r = await fetch("/api/run", {
+    const r = await fetch("/api/process/run_simulation", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
+      body: JSON.stringify({
+        silos: payload.silos || [],
+        layers: payload.layers || [],
+        suppliers: payload.suppliers || [],
+        incoming_queue: payload.incoming_queue || [],
+      }),
     });
     const data = await r.json();
     if (!r.ok) {
@@ -507,17 +580,43 @@ async function runSimulation() {
       printRaw(data);
       return;
     }
-    updateRunKpis(data);
-    renderSummary(data);
-    renderRemainingFocus(data);
-    renderContributionBars(data);
-    renderSiloTable(data);
-    renderStateLedger(data);
-    lastRunResult = data;
+    const summary = data.summary || {};
+    const state = data.state || {};
+    const totalRemaining = Number((summary.silos || []).reduce((a, s) => a + Number(s.remaining_kg || 0), 0));
+    const totalCapacity = Number((summary.silos || []).reduce((a, s) => a + Number(s.capacity_kg || 0), 0));
+    const totalUsed = Number((summary.silos || []).reduce((a, s) => a + Number(s.used_kg || 0), 0));
+
+    kpiDischargedEl.textContent = Number(0).toFixed(3);
+    kpiRemainingEl.textContent = totalRemaining.toFixed(3);
+    renderSiloFillTable(summary);
+    renderUpcomingLots({ layers: state.layers || [] });
+    summaryCardsEl.innerHTML = `
+      <div class="card"><div class="card-key">Total Capacity (kg)</div><div class="card-value">${totalCapacity.toFixed(3)}</div></div>
+      <div class="card"><div class="card-key">Current Inventory (kg)</div><div class="card-value">${totalUsed.toFixed(3)}</div></div>
+      <div class="card"><div class="card-key">Total Remaining (kg)</div><div class="card-value">${totalRemaining.toFixed(3)}</div></div>
+      <div class="card"><div class="card-key">Incoming Queue Count</div><div class="card-value">${Number(summary.incoming_queue?.count || 0)}</div></div>
+      <div class="card"><div class="card-key">Incoming Queue Mass (kg)</div><div class="card-value">${Number(summary.incoming_queue?.total_mass_kg || 0).toFixed(3)}</div></div>
+      <div class="card"><div class="card-key">Cumulative Discharged (kg)</div><div class="card-value">${Number(summary.cumulative_discharged_kg || 0).toFixed(3)}</div></div>
+    `;
+    payloadEl.value = JSON.stringify(
+      {
+        ...payload,
+        silos: state.silos || payload.silos || [],
+        layers: state.layers || payload.layers || [],
+        suppliers: state.suppliers || payload.suppliers || [],
+        incoming_queue: state.incoming_queue || payload.incoming_queue || [],
+      },
+      null,
+      2
+    );
+    remainingFocusWrapEl.innerHTML = "";
+    contributionWrapEl.innerHTML = "";
+    stateLedgerWrapEl.innerHTML = "";
+    lastRunResult = null;
     setStepState(stepRun, statusRun, "is-success", "Complete");
     setStepState(stepResults, statusResults, "is-success", "Ready");
     runStatusEl.className = "run-status success";
-    runStatusEl.textContent = "Simulation complete. Review remaining mass and contribution visuals.";
+    runStatusEl.textContent = "Fill complete. No discharge performed.";
     printRaw(data);
   } catch (e) {
     setStepState(stepRun, statusRun, "is-warning", "Run Failed");
@@ -559,15 +658,16 @@ async function optimizeBlend() {
       optimizeBtn.setAttribute("aria-busy", "true");
     }
 
-    const payload = parsePayload();
-    payload.target_params = targetParamsFromUI();
-    payload.iterations = Number(document.getElementById("opt_iterations").value || 120);
-    payload.seed = Number(optSeedEl?.value || 42);
-
-    const r = await fetch("/api/optimize", {
+    const payloadSafe = safePayloadOrEmpty();
+    const r = await fetch("/api/process/optimize", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
+      body: JSON.stringify({
+        target_params: targetParamsFromUI(),
+        iterations: Number(document.getElementById("opt_iterations").value || 120),
+        seed: Number(optSeedEl?.value || 42),
+        config: payloadSafe.config || {},
+      }),
     });
     const data = await r.json();
     if (!r.ok) {
@@ -577,12 +677,7 @@ async function optimizeBlend() {
       return;
     }
     const bestRun = data.best_run || {};
-    updateRunKpis(bestRun);
-    renderSummary(bestRun);
-    renderRemainingFocus(bestRun);
-    renderContributionBars(bestRun);
-    renderSiloTable(bestRun);
-    renderStateLedger(bestRun);
+    // Optimization is advisory only; do not mutate current fill-state visuals.
     renderCandidateTable(data);
     renderChangeSummary(lastRunResult, data);
     renderScenarioCompare(lastRunResult, bestRun);
@@ -622,10 +717,90 @@ async function optimizeBlend() {
   }
 }
 
+async function applyCandidateDischarge(candidateIndex) {
+  if (!lastOptimizePayload?.top_candidates?.length) {
+    printRaw("No optimization candidate available.");
+    return;
+  }
+  const candidate = lastOptimizePayload.top_candidates[candidateIndex];
+  const dischargePlan = candidate?.recommended_discharge || [];
+  if (!dischargePlan.length) {
+    printRaw("Selected candidate has no discharge plan.");
+    return;
+  }
+  const payloadSafe = safePayloadOrEmpty();
+  const r = await fetch("/api/process/apply_discharge", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      discharge: dischargePlan,
+      config: payloadSafe.config || {},
+    }),
+  });
+  const data = await r.json();
+  if (!r.ok) {
+    printRaw(data);
+    return;
+  }
+  printRaw(data);
+  if (data.summary) {
+    const summary = data.summary;
+    const totalCapacity = Number((summary.silos || []).reduce((a, s) => a + Number(s.capacity_kg || 0), 0));
+    const totalUsed = Number((summary.silos || []).reduce((a, s) => a + Number(s.used_kg || 0), 0));
+    const totalRemaining = Number((summary.silos || []).reduce((a, s) => a + Number(s.remaining_kg || 0), 0));
+    const dischargedThisEvent = Number(data.predicted_run?.total_discharged_mass_kg || 0);
+
+    kpiDischargedEl.textContent = dischargedThisEvent.toFixed(3);
+    kpiRemainingEl.textContent = totalRemaining.toFixed(3);
+
+    summaryCardsEl.innerHTML = `
+      <div class="card"><div class="card-key">Total Capacity (kg)</div><div class="card-value">${totalCapacity.toFixed(3)}</div></div>
+      <div class="card"><div class="card-key">Current Inventory (kg)</div><div class="card-value">${totalUsed.toFixed(3)}</div></div>
+      <div class="card"><div class="card-key">Total Remaining (kg)</div><div class="card-value">${totalRemaining.toFixed(3)}</div></div>
+      <div class="card"><div class="card-key">Discharged This Event (kg)</div><div class="card-value">${dischargedThisEvent.toFixed(3)}</div></div>
+      <div class="card"><div class="card-key">Cumulative Discharged (kg)</div><div class="card-value">${Number(summary.cumulative_discharged_kg || 0).toFixed(3)}</div></div>
+      <div class="card"><div class="card-key">Incoming Queue Mass (kg)</div><div class="card-value">${Number(summary.incoming_queue?.total_mass_kg || 0).toFixed(3)}</div></div>
+    `;
+
+    renderSiloFillTable(summary);
+    remainingFocusWrapEl.innerHTML = "";
+    contributionWrapEl.innerHTML = "";
+    stateLedgerWrapEl.innerHTML = "";
+    if (data.predicted_run) {
+      lastRunResult = data.predicted_run;
+    }
+    setStepState(stepResults, statusResults, "is-success", "Updated");
+    runStatusEl.className = "run-status success";
+    runStatusEl.textContent = "Discharge applied to silos using selected candidate.";
+  }
+  if (data.state) {
+    const current = safePayloadOrEmpty();
+    payloadEl.value = JSON.stringify(
+      {
+        ...current,
+        silos: data.state.silos || [],
+        layers: data.state.layers || [],
+        suppliers: data.state.suppliers || [],
+        incoming_queue: data.state.incoming_queue || [],
+      },
+      null,
+      2
+    );
+    renderUpcomingLots({
+      layers: data.state.layers || [],
+    });
+  }
+}
+
 document.getElementById("loadSampleBtn").addEventListener("click", loadSample);
 document.getElementById("validateBtn").addEventListener("click", validatePayload);
 document.getElementById("runBtn").addEventListener("click", runSimulation);
 if (optimizeBtn) optimizeBtn.addEventListener("click", optimizeBlend);
+if (applyDischargeBtn) {
+  applyDischargeBtn.addEventListener("click", () => {
+    printRaw("Use the Discharge button on a candidate row.");
+  });
+}
 if (optPresetEl) {
   optPresetEl.addEventListener("change", () => {
     const mode = optPresetEl.value;
@@ -639,6 +814,14 @@ if (optPresetEl) {
 if (candidateSortEl) {
   candidateSortEl.addEventListener("change", () => {
     if (lastOptimizePayload) renderCandidateTable(lastOptimizePayload);
+  });
+}
+if (candidateTableWrapEl) {
+  candidateTableWrapEl.addEventListener("click", (e) => {
+    const btn = e.target.closest(".candidate-discharge-btn");
+    if (!btn) return;
+    const idx = Number(btn.getAttribute("data-candidate-index") || 0);
+    applyCandidateDischarge(idx);
   });
 }
 
@@ -666,4 +849,4 @@ convergenceWrapEl.innerHTML = "Convergence snapshot will appear after optimize."
 kpiObjectiveEl.textContent = "N/A";
 printRaw("UI ready. Load sample, validate inputs, run, then optimize.");
 
-loadSample();
+scheduleInitialSampleLoad();
