@@ -17,13 +17,15 @@ CREATE TABLE IF NOT EXISTS silos (
 CREATE TABLE IF NOT EXISTS layers (
     id BIGSERIAL PRIMARY KEY,
     silo_id TEXT NOT NULL REFERENCES silos(silo_id) ON DELETE CASCADE,
+    snapshot_id BIGINT NOT NULL DEFAULT 1,
+    event_type TEXT NOT NULL DEFAULT 'snapshot',
+    captured_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     layer_index INTEGER NOT NULL,
     lot_id TEXT NOT NULL,
     supplier TEXT NOT NULL,
-    remaining_mass_kg DOUBLE PRECISION NOT NULL,
+    loaded_mass DOUBLE PRECISION NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    UNIQUE (silo_id, layer_index)
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 CREATE TABLE IF NOT EXISTS suppliers (
@@ -43,6 +45,8 @@ CREATE TABLE IF NOT EXISTS incoming_queue (
     lot_id TEXT NOT NULL,
     supplier TEXT NOT NULL,
     mass_kg DOUBLE PRECISION NOT NULL,
+    remaining_mass_kg DOUBLE PRECISION,
+    is_fully_consumed BOOLEAN NOT NULL DEFAULT FALSE,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
@@ -92,6 +96,15 @@ CREATE TABLE IF NOT EXISTS results_optimize (
     top_candidates JSONB NOT NULL DEFAULT '[]'::jsonb,
     best_run JSONB NOT NULL DEFAULT '{}'::jsonb
 );
+
+CREATE TABLE IF NOT EXISTS discharge_results (
+    id BIGSERIAL PRIMARY KEY,
+    timestamp TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    discharge_by_silo JSONB NOT NULL DEFAULT '{}'::jsonb,
+    predicted_run JSONB NOT NULL DEFAULT '{}'::jsonb,
+    summary_before JSONB NOT NULL DEFAULT '{}'::jsonb,
+    summary_after JSONB NOT NULL DEFAULT '{}'::jsonb
+);
 """
 
 
@@ -105,3 +118,31 @@ def ensure_schema() -> None:
             conn.execute("ALTER TABLE suppliers ADD COLUMN IF NOT EXISTS diastatic_power_WK DOUBLE PRECISION")
             conn.execute("ALTER TABLE suppliers ADD COLUMN IF NOT EXISTS total_protein_pct DOUBLE PRECISION")
             conn.execute("ALTER TABLE suppliers ADD COLUMN IF NOT EXISTS wort_colour_EBC DOUBLE PRECISION")
+            conn.execute("ALTER TABLE incoming_queue ADD COLUMN IF NOT EXISTS remaining_mass_kg DOUBLE PRECISION")
+            conn.execute("ALTER TABLE incoming_queue ADD COLUMN IF NOT EXISTS is_fully_consumed BOOLEAN NOT NULL DEFAULT FALSE")
+            conn.execute("UPDATE incoming_queue SET remaining_mass_kg = mass_kg WHERE remaining_mass_kg IS NULL")
+            conn.execute("ALTER TABLE layers ADD COLUMN IF NOT EXISTS snapshot_id BIGINT NOT NULL DEFAULT 1")
+            conn.execute("ALTER TABLE layers ADD COLUMN IF NOT EXISTS event_type TEXT NOT NULL DEFAULT 'snapshot'")
+            conn.execute("ALTER TABLE layers ADD COLUMN IF NOT EXISTS captured_at TIMESTAMPTZ NOT NULL DEFAULT NOW()")
+            conn.execute("ALTER TABLE layers ADD COLUMN IF NOT EXISTS loaded_mass DOUBLE PRECISION")
+            conn.execute(
+                """
+                DO $$
+                BEGIN
+                    IF EXISTS (
+                        SELECT 1
+                        FROM information_schema.columns
+                        WHERE table_schema = 'public'
+                          AND table_name = 'layers'
+                          AND column_name = 'remaining_mass_kg'
+                    ) THEN
+                        EXECUTE 'UPDATE layers SET loaded_mass = COALESCE(loaded_mass, remaining_mass_kg)';
+                    END IF;
+                END
+                $$;
+                """
+            )
+            conn.execute("ALTER TABLE layers DROP COLUMN IF EXISTS remaining_mass_kg")
+            conn.execute("DROP TABLE IF EXISTS layers_history")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_layers_snapshot_id ON layers(snapshot_id)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_layers_captured_at ON layers(captured_at DESC)")

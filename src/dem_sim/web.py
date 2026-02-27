@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import random
 from io import StringIO
 from math import isnan
@@ -26,6 +27,8 @@ from .sample_data import (
     SUPPLIERS_CSV,
 )
 from .service import RunConfig, run_blend
+from .db import execute, fetchall, get_conn
+from .schema import ensure_schema as ensure_db_schema
 from .state import (
     add_stage,
     apply_discharge_to_state,
@@ -46,10 +49,82 @@ def _ensure_storage_ready() -> None:
     if _STORAGE_READY:
         return
     try:
+        ensure_db_schema()
         _STORAGE.ensure_schema()
         _STORAGE_READY = True
     except Exception:
         return
+
+
+def _sync_incoming_queue_to_db(state_queue: list[dict[str, Any]]) -> None:
+    # Persist per-lot queue state back to DB without creating new rows.
+    lot_remaining: dict[str, float] = {}
+    for row in state_queue:
+        lot_id = str(row.get("lot_id", ""))
+        if not lot_id:
+            continue
+        lot_remaining[lot_id] = round(max(0.0, float(row.get("mass_kg", 0.0))), 6)
+
+    db_rows = fetchall("SELECT id, lot_id FROM incoming_queue ORDER BY id")
+    for row in db_rows:
+        row_id = int(row.get("id", 0))
+        lot_id = str(row.get("lot_id", ""))
+        remaining = float(lot_remaining.get(lot_id, 0.0))
+        consumed = remaining <= 1e-9
+        execute(
+            """
+            UPDATE incoming_queue
+            SET remaining_mass_kg = %s, is_fully_consumed = %s
+            WHERE id = %s
+            """,
+            (remaining, consumed, row_id),
+        )
+
+
+def _sync_layers_to_db(state: dict[str, Any], event_type: str) -> None:
+    # Persist current fill-state layers as an append-only snapshot in `layers`.
+    # Discharge sync is intentionally separate.
+    silos = [str(s.get("silo_id", "")) for s in state.get("silos", []) if str(s.get("silo_id", ""))]
+    by_silo: dict[str, list[dict[str, Any]]] = {sid: [] for sid in silos}
+    for row in state.get("layers", []):
+        sid = str(row.get("silo_id", ""))
+        if sid in by_silo:
+            by_silo[sid].append(dict(row))
+
+    with get_conn() as conn:
+        with conn.transaction():
+            snap_row = conn.execute(
+                "SELECT COALESCE(MAX(snapshot_id), 0) AS max_snapshot_id FROM layers"
+            ).fetchone()
+            snapshot_id = int(snap_row["max_snapshot_id"]) + 1 if snap_row else 1
+            for sid in silos:
+                silo_layers = by_silo.get(sid, [])
+                silo_layers.sort(key=lambda r: int(r.get("layer_index", 0)))
+                for idx, row in enumerate(silo_layers, start=1):
+                    lot_id = str(row.get("lot_id", ""))
+                    supplier = str(row.get("supplier", ""))
+                    remaining_mass_kg = float(
+                        row.get("remaining_mass_kg", row.get("segment_mass_kg", 0.0)) or 0.0
+                    )
+                    if remaining_mass_kg <= 0:
+                        continue
+                    conn.execute(
+                        """
+                        INSERT INTO layers (
+                            silo_id, snapshot_id, event_type, layer_index, lot_id, supplier, loaded_mass
+                        )
+                        VALUES (%s, %s, %s, %s, %s, %s, %s)
+                        """,
+                        (
+                            sid,
+                            snapshot_id,
+                            event_type,
+                            idx,
+                            lot_id,
+                            supplier,
+                            round(remaining_mass_kg, 6),
+                        ),
+                    )
 
 
 def _persist_state_bundle(event_type: str, payload: dict[str, Any] | None = None) -> None:
@@ -126,6 +201,109 @@ def _records_json_safe(df: pd.DataFrame) -> list[dict[str, Any]]:
 
 
 def _sample_payload() -> dict[str, Any]:
+    # Prefer on-prem Postgres input when available; fallback to bundled CSV sample.
+    try:
+        silos_rows = fetchall(
+            """
+            SELECT silo_id, capacity_kg, body_diameter_m, outlet_diameter_m, initial_mass_kg
+            FROM silos
+            ORDER BY silo_id
+            """
+        )
+        queue_rows = fetchall(
+            """
+            SELECT *
+            FROM incoming_queue
+            ORDER BY id
+            """
+        )
+        layers_rows = fetchall(
+            """
+            SELECT silo_id, layer_index, lot_id, supplier, loaded_mass
+            FROM layers
+            WHERE snapshot_id = (SELECT COALESCE(MAX(snapshot_id), 0) FROM layers)
+            ORDER BY silo_id, layer_index
+            """
+        )
+        if silos_rows:
+            silos = [
+                {
+                    "silo_id": str(r.get("silo_id", "")),
+                    "capacity_kg": float(r.get("capacity_kg", 0.0)),
+                    "body_diameter_m": float(r.get("body_diameter_m", 0.0)),
+                    "outlet_diameter_m": float(r.get("outlet_diameter_m", 0.0)),
+                    "initial_mass_kg": float(r.get("initial_mass_kg", 0.0) or 0.0),
+                }
+                for r in silos_rows
+            ]
+            incoming_queue = []
+            supplier_agg: dict[str, dict[str, Any]] = {}
+            for r in queue_rows:
+                supplier_name = str(r.get("supplier", ""))
+                lot_id = str(r.get("lot_id", ""))
+                base_mass_kg = float(r.get("mass_kg", 0.0) or 0.0)
+                remaining_mass_kg = float(r.get("remaining_mass_kg", base_mass_kg) or 0.0)
+                is_fully_consumed = bool(r.get("is_fully_consumed", False))
+                if (remaining_mass_kg > 0) and (not is_fully_consumed):
+                    incoming_queue.append(
+                        {"lot_id": lot_id, "supplier": supplier_name, "mass_kg": remaining_mass_kg}
+                    )
+                if not supplier_name:
+                    continue
+                # Supplier quality is denormalized on incoming_queue by design.
+                if supplier_name not in supplier_agg:
+                    supplier_agg[supplier_name] = {
+                        "supplier": supplier_name,
+                        "moisture_pct": float(r.get("moisture_pct", 0.0) or 0.0),
+                        "fine_extract_db_pct": float(r.get("fine_extract_db_pct", 0.0) or 0.0),
+                        "wort_pH": float(r.get("wort_pH", 0.0) or 0.0),
+                        "diastatic_power_WK": float(r.get("diastatic_power_WK", 0.0) or 0.0),
+                        "total_protein_pct": float(r.get("total_protein_pct", 0.0) or 0.0),
+                        "wort_colour_EBC": float(r.get("wort_colour_EBC", 0.0) or 0.0),
+                    }
+            suppliers = list(supplier_agg.values())
+            layers = [
+                {
+                    "silo_id": str(r.get("silo_id", "")),
+                    "layer_index": int(r.get("layer_index", 0) or 0),
+                    "lot_id": str(r.get("lot_id", "")),
+                    "supplier": str(r.get("supplier", "")),
+                    "segment_mass_kg": float(r.get("loaded_mass", 0.0) or 0.0),
+                    "remaining_mass_kg": float(r.get("loaded_mass", 0.0) or 0.0),
+                }
+                for r in layers_rows
+                if float(r.get("loaded_mass", 0.0) or 0.0) > 0
+            ]
+            return {
+                "silos": silos,
+                "layers": layers,
+                "suppliers": suppliers,
+                "discharge": [
+                    {"silo_id": s["silo_id"], "discharge_mass_kg": None, "discharge_fraction": 0.5}
+                    for s in silos
+                ],
+                "assumptions": {
+                    "lot_size_kg": LOT_SIZE_KG,
+                    "silo_slot_count": SILO_SLOT_COUNT,
+                    "silo_count": len(silos),
+                    "silo_capacity_kg": float(sum(float(s.get("capacity_kg", 0.0)) for s in silos)),
+                    "charging_policy": "db_bootstrap_fill_only",
+                },
+                "incoming_queue": incoming_queue,
+                "config": {
+                    "rho_bulk_kg_m3": 610.0,
+                    "grain_diameter_m": 0.004,
+                    "beverloo_c": 0.58,
+                    "beverloo_k": 1.4,
+                    "gravity_m_s2": 9.81,
+                    "sigma_m": 0.12,
+                    "steps": 2000,
+                    "auto_adjust": True,
+                },
+            }
+    except Exception:
+        pass
+
     layers = _records_json_safe(pd.read_csv(StringIO(LAYERS_CSV)))
     placed_lot_ids = {str(x.get("lot_id", "")) for x in layers}
     queue: list[dict[str, Any]] = []
@@ -162,10 +340,28 @@ def _sample_payload() -> dict[str, Any]:
     }
 
 
+def _load_incoming_queue_from_db() -> list[dict[str, Any]]:
+    rows = fetchall(
+        """
+        SELECT lot_id, supplier, COALESCE(remaining_mass_kg, mass_kg) AS live_mass_kg
+        FROM incoming_queue
+        WHERE COALESCE(is_fully_consumed, FALSE) = FALSE
+          AND COALESCE(remaining_mass_kg, mass_kg) > 0
+        ORDER BY id
+        """
+    )
+    return [
+        {
+            "lot_id": str(r.get("lot_id", "")),
+            "supplier": str(r.get("supplier", "")),
+            "mass_kg": float(r.get("live_mass_kg", 0.0) or 0.0),
+        }
+        for r in rows
+    ]
+
+
 def _ensure_state_initialized() -> None:
-    state = get_state()
-    if state.get("silos") and state.get("layers"):
-        return
+    # Always reload from DB/sample source per request to avoid stale in-memory state.
     payload = _sample_payload()
     set_state(
         silos=payload["silos"],
@@ -367,6 +563,11 @@ def create_app() -> FastAPI:
             meta={},
         )
         out = {"state": get_state(), "summary": summarize_state()}
+        try:
+            _sync_incoming_queue_to_db(out["state"].get("incoming_queue", []))
+            _sync_layers_to_db(out["state"], event_type="state_reset")
+        except Exception:
+            pass
         _persist_state_bundle("state_reset", payload=out)
         return out
 
@@ -375,15 +576,21 @@ def create_app() -> FastAPI:
         _ensure_state_initialized()
         # If payload state is provided, use it as the current authoritative state for fill-only simulation.
         if req.silos and req.layers:
+            db_queue = _load_incoming_queue_from_db()
             set_state(
                 silos=req.silos,
                 layers=req.layers,
                 suppliers=req.suppliers,
-                incoming_queue=req.incoming_queue,
+                incoming_queue=db_queue,
                 action="run_simulation_payload_state",
-                meta={"source": "run_simulation_request"},
+                meta={"source": "run_simulation_request", "incoming_queue_source": "db"},
             )
         out = run_fill_only_simulation()
+        try:
+            _sync_incoming_queue_to_db(out["state"].get("incoming_queue", []))
+            _sync_layers_to_db(out["state"], event_type="run_simulation_fill_only")
+        except Exception:
+            pass
         _persist_state_bundle("run_simulation_fill_only", payload={"request": req.model_dump(), "summary": out.get("summary", {})})
         return out
 
@@ -394,8 +601,12 @@ def create_app() -> FastAPI:
 
     @app.post("/api/process/optimize")
     def process_optimize(req: ProcessOptimizeRequest) -> dict[str, Any]:
-        _ensure_state_initialized()
+        # Use current UI-provided payload state (already held in memory) for optimization.
+        # Do not force DB reload here; this preserves the exact working scenario from UI.
         state = get_state()
+        if not state.get("silos"):
+            _ensure_state_initialized()
+            state = get_state()
         opt_req = OptimizeRequest(
             silos=state.get("silos", []),
             layers=state.get("layers", []),
@@ -477,15 +688,43 @@ def create_app() -> FastAPI:
             meta={"discharge_by_silo": discharge_by_silo},
         )
         out = {"state": updated, "summary": after, "predicted_run": predicted}
+        try:
+            execute(
+                """
+                INSERT INTO discharge_results (
+                    discharge_by_silo,
+                    predicted_run,
+                    summary_before,
+                    summary_after
+                )
+                VALUES (%s::jsonb, %s::jsonb, %s::jsonb, %s::jsonb)
+                """,
+                (
+                    json.dumps(discharge_by_silo),
+                    json.dumps(predicted),
+                    json.dumps(before),
+                    json.dumps(after),
+                ),
+            )
+            _sync_layers_to_db(updated, event_type="apply_discharge")
+        except Exception:
+            pass
         _persist_result("apply_discharge_predicted", predicted, payload={"discharge_by_silo": discharge_by_silo})
         _persist_state_bundle("apply_discharge", payload=out)
         return out
 
     @app.post("/api/validate")
     def validate(req: RunRequest) -> dict[str, Any]:
+        layers_df = pd.DataFrame(req.layers)
+        # Fill-first mode can legitimately start with no layers.
+        # Provide required columns so schema validation focuses on provided data.
+        if layers_df.empty:
+            layers_df = pd.DataFrame(
+                columns=["silo_id", "layer_index", "lot_id", "supplier", "segment_mass_kg"]
+            )
         inputs = {
             "silos": pd.DataFrame(req.silos),
-            "layers": pd.DataFrame(req.layers),
+            "layers": layers_df,
             "suppliers": pd.DataFrame(req.suppliers),
             "discharge": pd.DataFrame(req.discharge),
         }
@@ -507,6 +746,25 @@ def create_app() -> FastAPI:
         cfg = RunConfig(**req.config)
         result = run_blend(inputs, cfg)
         out = _result_to_api_payload(result)
+        try:
+            seg = result.get("df_segment_state_ledger")
+            if seg is not None and not seg.empty:
+                run_layers = [
+                    {
+                        "silo_id": str(r.get("silo_id", "")),
+                        "layer_index": int(r.get("layer_index", 0) or 0),
+                        "lot_id": str(r.get("lot_id", "")),
+                        "supplier": str(r.get("supplier", "")),
+                        "remaining_mass_kg": float(r.get("remaining_mass_kg", 0.0) or 0.0),
+                    }
+                    for r in seg.to_dict(orient="records")
+                ]
+                _sync_layers_to_db(
+                    state={"silos": req.silos, "layers": run_layers},
+                    event_type="run_simulation",
+                )
+        except Exception:
+            pass
         _persist_result("run", out, payload=req.model_dump())
         return out
 
@@ -632,6 +890,28 @@ def create_app() -> FastAPI:
             "param_ranges": DEFAULT_PARAM_RANGES,
             "top_candidates": top_candidates,
         }
+        try:
+            execute(
+                """
+                INSERT INTO results_optimize (
+                    objective_score,
+                    recommended_discharge,
+                    target_params,
+                    top_candidates,
+                    best_run
+                )
+                VALUES (%s, %s::jsonb, %s::jsonb, %s::jsonb, %s::jsonb)
+                """,
+                (
+                    float(out["objective_score"]),
+                    json.dumps(out["recommended_discharge"]),
+                    json.dumps(out["target_params"]),
+                    json.dumps(out["top_candidates"]),
+                    json.dumps(out["best_run"]),
+                ),
+            )
+        except Exception:
+            pass
         _persist_result("optimize", out, payload=req.model_dump())
         return out
 
