@@ -105,6 +105,22 @@ CREATE TABLE IF NOT EXISTS discharge_results (
     summary_before JSONB NOT NULL DEFAULT '{}'::jsonb,
     summary_after JSONB NOT NULL DEFAULT '{}'::jsonb
 );
+
+CREATE TABLE IF NOT EXISTS sim_events (
+    id BIGSERIAL PRIMARY KEY,
+    timestamp TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    event_type TEXT NOT NULL,
+    action TEXT,
+    state_before JSONB NOT NULL DEFAULT '{}'::jsonb,
+    state_after JSONB NOT NULL DEFAULT '{}'::jsonb,
+    discharge_by_silo JSONB NOT NULL DEFAULT '{}'::jsonb,
+    total_discharged_mass_kg DOUBLE PRECISION,
+    total_remaining_mass_kg DOUBLE PRECISION,
+    incoming_queue_count INTEGER,
+    incoming_queue_mass_kg DOUBLE PRECISION,
+    objective_score DOUBLE PRECISION,
+    meta JSONB NOT NULL DEFAULT '{}'::jsonb
+);
 """
 
 

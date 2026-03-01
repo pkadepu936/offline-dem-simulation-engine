@@ -153,6 +153,59 @@ def _persist_result(event_type: str, result: dict[str, Any], payload: dict[str, 
         return
 
 
+def _write_sim_event(
+    *,
+    event_type: str,
+    action: str,
+    state_before: dict[str, Any] | None = None,
+    state_after: dict[str, Any] | None = None,
+    discharge_by_silo: dict[str, float] | None = None,
+    total_discharged_mass_kg: float | None = None,
+    total_remaining_mass_kg: float | None = None,
+    incoming_queue_count: int | None = None,
+    incoming_queue_mass_kg: float | None = None,
+    objective_score: float | None = None,
+    meta: dict[str, Any] | None = None,
+) -> None:
+    try:
+        # Ensure consolidated tracking table exists before insert.
+        ensure_db_schema()
+        execute(
+            """
+            INSERT INTO sim_events (
+                event_type,
+                action,
+                state_before,
+                state_after,
+                discharge_by_silo,
+                total_discharged_mass_kg,
+                total_remaining_mass_kg,
+                incoming_queue_count,
+                incoming_queue_mass_kg,
+                objective_score,
+                meta
+            )
+            VALUES (%s, %s, %s::jsonb, %s::jsonb, %s::jsonb, %s, %s, %s, %s, %s, %s::jsonb)
+            """,
+            (
+                event_type,
+                action,
+                json.dumps(state_before or {}),
+                json.dumps(state_after or {}),
+                json.dumps(discharge_by_silo or {}),
+                total_discharged_mass_kg,
+                total_remaining_mass_kg,
+                incoming_queue_count,
+                incoming_queue_mass_kg,
+                objective_score,
+                json.dumps(meta or {}),
+            ),
+        )
+    except Exception as e:
+        # Keep request flow alive, but emit a visible diagnostic instead of silent drop.
+        print(f"[sim_events] insert failed: {e}")
+
+
 class RunRequest(BaseModel):
     silos: list[dict[str, Any]] = Field(default_factory=list)
     layers: list[dict[str, Any]] = Field(default_factory=list)
@@ -568,12 +621,20 @@ def create_app() -> FastAPI:
             _sync_layers_to_db(out["state"], event_type="state_reset")
         except Exception:
             pass
-        _persist_state_bundle("state_reset", payload=out)
+        _write_sim_event(
+            event_type="state_reset",
+            action="state_reset_to_sample",
+            state_after=out.get("state", {}),
+            incoming_queue_count=int(out.get("summary", {}).get("incoming_queue", {}).get("count", 0)),
+            incoming_queue_mass_kg=float(out.get("summary", {}).get("incoming_queue", {}).get("total_mass_kg", 0.0)),
+            meta={"source": "state_reset"},
+        )
         return out
 
     @app.post("/api/process/run_simulation")
     def process_run_simulation(req: ProcessRunSimulationRequest) -> dict[str, Any]:
         _ensure_state_initialized()
+        before_state = get_state()
         # If payload state is provided, use it as the current authoritative state for fill-only simulation.
         if req.silos and req.layers:
             db_queue = _load_incoming_queue_from_db()
@@ -586,12 +647,25 @@ def create_app() -> FastAPI:
                 meta={"source": "run_simulation_request", "incoming_queue_source": "db"},
             )
         out = run_fill_only_simulation()
+        after_state = out.get("state", {})
+        after_summary = out.get("summary", {})
         try:
             _sync_incoming_queue_to_db(out["state"].get("incoming_queue", []))
             _sync_layers_to_db(out["state"], event_type="run_simulation_fill_only")
         except Exception:
             pass
-        _persist_state_bundle("run_simulation_fill_only", payload={"request": req.model_dump(), "summary": out.get("summary", {})})
+        _write_sim_event(
+            event_type="run_simulation_fill_only",
+            action="run_simulation_fill_only",
+            state_before=before_state,
+            state_after=after_state,
+            total_discharged_mass_kg=0.0,
+            total_remaining_mass_kg=None,
+            incoming_queue_count=int(after_summary.get("incoming_queue", {}).get("count", 0)),
+            incoming_queue_mass_kg=float(after_summary.get("incoming_queue", {}).get("total_mass_kg", 0.0)),
+            meta={"source": "process_run_simulation"},
+        )
+        # Intentionally do not call _persist_state_bundle here; use sim_events only.
         return out
 
     @app.get("/api/process/stages")
@@ -709,8 +783,20 @@ def create_app() -> FastAPI:
             _sync_layers_to_db(updated, event_type="apply_discharge")
         except Exception:
             pass
+        _write_sim_event(
+            event_type="apply_discharge",
+            action="apply_discharge",
+            state_before={"summary": before},
+            state_after={"summary": after},
+            discharge_by_silo=discharge_by_silo,
+            total_discharged_mass_kg=float(predicted.get("total_discharged_mass_kg", 0.0)),
+            total_remaining_mass_kg=float(predicted.get("total_remaining_mass_kg", 0.0)),
+            incoming_queue_count=int(after.get("incoming_queue", {}).get("count", 0)),
+            incoming_queue_mass_kg=float(after.get("incoming_queue", {}).get("total_mass_kg", 0.0)),
+            meta={"source": "process_apply_discharge"},
+        )
         _persist_result("apply_discharge_predicted", predicted, payload={"discharge_by_silo": discharge_by_silo})
-        _persist_state_bundle("apply_discharge", payload=out)
+        # Intentionally do not call _persist_state_bundle here; use sim_events/discharge tables.
         return out
 
     @app.post("/api/validate")
@@ -765,6 +851,17 @@ def create_app() -> FastAPI:
                 )
         except Exception:
             pass
+        _write_sim_event(
+            event_type="run",
+            action="run",
+            state_before={},
+            state_after={},
+            total_discharged_mass_kg=float(out.get("total_discharged_mass_kg", 0.0)),
+            total_remaining_mass_kg=float(out.get("total_remaining_mass_kg", 0.0)),
+            incoming_queue_count=None,
+            incoming_queue_mass_kg=None,
+            meta={"source": "api_run"},
+        )
         _persist_result("run", out, payload=req.model_dump())
         return out
 
@@ -912,6 +1009,14 @@ def create_app() -> FastAPI:
             )
         except Exception:
             pass
+        _write_sim_event(
+            event_type="optimize",
+            action="optimize",
+            total_discharged_mass_kg=float(out.get("best_run", {}).get("total_discharged_mass_kg", 0.0)),
+            total_remaining_mass_kg=float(out.get("best_run", {}).get("total_remaining_mass_kg", 0.0)),
+            objective_score=float(out.get("objective_score", 0.0)),
+            meta={"source": "api_optimize"},
+        )
         _persist_result("optimize", out, payload=req.model_dump())
         return out
 
