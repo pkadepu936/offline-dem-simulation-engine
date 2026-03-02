@@ -106,8 +106,6 @@ def _sync_layers_to_db(state: dict[str, Any], event_type: str) -> None:
                     remaining_mass_kg = float(
                         row.get("remaining_mass_kg", row.get("segment_mass_kg", 0.0)) or 0.0
                     )
-                    if remaining_mass_kg <= 0:
-                        continue
                     conn.execute(
                         """
                         INSERT INTO layers (
@@ -254,7 +252,67 @@ def _records_json_safe(df: pd.DataFrame) -> list[dict[str, Any]]:
 
 
 def _sample_payload() -> dict[str, Any]:
-    # Prefer on-prem Postgres input when available; fallback to bundled CSV sample.
+    # Prefer consolidated event state from sim_events; fallback to tables/sample.
+    try:
+        rows = fetchall(
+            """
+            SELECT state_after
+            FROM sim_events
+            ORDER BY id DESC
+            LIMIT 100
+            """
+        )
+        for r in rows:
+            state_after = r.get("state_after")
+            if isinstance(state_after, str):
+                try:
+                    state_after = json.loads(state_after)
+                except Exception:
+                    state_after = None
+            if not isinstance(state_after, dict):
+                continue
+            silos = state_after.get("silos")
+            layers = state_after.get("layers")
+            suppliers = state_after.get("suppliers")
+            incoming_queue = state_after.get("incoming_queue")
+            if not isinstance(silos, list) or not isinstance(layers, list):
+                continue
+            if suppliers is None:
+                suppliers = []
+            if incoming_queue is None:
+                incoming_queue = []
+            return {
+                "silos": silos,
+                "layers": layers,
+                "suppliers": suppliers,
+                "discharge": [
+                    {"silo_id": str(s.get("silo_id", "")), "discharge_mass_kg": None, "discharge_fraction": 0.5}
+                    for s in silos
+                    if str(s.get("silo_id", ""))
+                ],
+                "assumptions": {
+                    "lot_size_kg": LOT_SIZE_KG,
+                    "silo_slot_count": SILO_SLOT_COUNT,
+                    "silo_count": len(silos),
+                    "silo_capacity_kg": float(sum(float(s.get("capacity_kg", 0.0)) for s in silos)),
+                    "charging_policy": "sim_events_state_after",
+                },
+                "incoming_queue": incoming_queue,
+                "config": {
+                    "rho_bulk_kg_m3": 610.0,
+                    "grain_diameter_m": 0.004,
+                    "beverloo_c": 0.58,
+                    "beverloo_k": 1.4,
+                    "gravity_m_s2": 9.81,
+                    "sigma_m": 0.12,
+                    "steps": 2000,
+                    "auto_adjust": True,
+                },
+            }
+    except Exception:
+        pass
+
+    # Fallback: prefer on-prem Postgres input when available; fallback to bundled CSV sample.
     try:
         silos_rows = fetchall(
             """
@@ -618,9 +676,12 @@ def create_app() -> FastAPI:
         out = {"state": get_state(), "summary": summarize_state()}
         try:
             _sync_incoming_queue_to_db(out["state"].get("incoming_queue", []))
+        except Exception as e:
+            print(f"[state_reset] incoming_queue sync failed: {e}")
+        try:
             _sync_layers_to_db(out["state"], event_type="state_reset")
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[state_reset] layers sync failed: {e}")
         _write_sim_event(
             event_type="state_reset",
             action="state_reset_to_sample",
@@ -635,25 +696,19 @@ def create_app() -> FastAPI:
     def process_run_simulation(req: ProcessRunSimulationRequest) -> dict[str, Any]:
         _ensure_state_initialized()
         before_state = get_state()
-        # If payload state is provided, use it as the current authoritative state for fill-only simulation.
-        if req.silos and req.layers:
-            db_queue = _load_incoming_queue_from_db()
-            set_state(
-                silos=req.silos,
-                layers=req.layers,
-                suppliers=req.suppliers,
-                incoming_queue=db_queue,
-                action="run_simulation_payload_state",
-                meta={"source": "run_simulation_request", "incoming_queue_source": "db"},
-            )
+        # DB is the source of truth for simulation state; ignore UI-provided state for mutation.
+        _ = req
         out = run_fill_only_simulation()
         after_state = out.get("state", {})
         after_summary = out.get("summary", {})
         try:
             _sync_incoming_queue_to_db(out["state"].get("incoming_queue", []))
+        except Exception as e:
+            print(f"[run_simulation_fill_only] incoming_queue sync failed: {e}")
+        try:
             _sync_layers_to_db(out["state"], event_type="run_simulation_fill_only")
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[run_simulation_fill_only] layers sync failed: {e}")
         _write_sim_event(
             event_type="run_simulation_fill_only",
             action="run_simulation_fill_only",
@@ -675,12 +730,9 @@ def create_app() -> FastAPI:
 
     @app.post("/api/process/optimize")
     def process_optimize(req: ProcessOptimizeRequest) -> dict[str, Any]:
-        # Use current UI-provided payload state (already held in memory) for optimization.
-        # Do not force DB reload here; this preserves the exact working scenario from UI.
+        # DB is the source of truth for optimization input state.
+        _ensure_state_initialized()
         state = get_state()
-        if not state.get("silos"):
-            _ensure_state_initialized()
-            state = get_state()
         opt_req = OptimizeRequest(
             silos=state.get("silos", []),
             layers=state.get("layers", []),
@@ -697,6 +749,7 @@ def create_app() -> FastAPI:
     def process_apply_discharge(req: ProcessApplyDischargeRequest) -> dict[str, Any]:
         _ensure_state_initialized()
         state = get_state()
+        before_state = state
         if not req.discharge:
             raise HTTPException(status_code=422, detail="discharge plan is required.")
         discharge_df = pd.DataFrame(req.discharge)
@@ -780,14 +833,17 @@ def create_app() -> FastAPI:
                     json.dumps(after),
                 ),
             )
+        except Exception as e:
+            print(f"[apply_discharge] discharge_results insert failed: {e}")
+        try:
             _sync_layers_to_db(updated, event_type="apply_discharge")
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[apply_discharge] layers sync failed: {e}")
         _write_sim_event(
             event_type="apply_discharge",
             action="apply_discharge",
-            state_before={"summary": before},
-            state_after={"summary": after},
+            state_before=before_state,
+            state_after=updated,
             discharge_by_silo=discharge_by_silo,
             total_discharged_mass_kg=float(predicted.get("total_discharged_mass_kg", 0.0)),
             total_remaining_mass_kg=float(predicted.get("total_remaining_mass_kg", 0.0)),

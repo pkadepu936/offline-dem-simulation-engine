@@ -6,26 +6,21 @@ const optOutEl = document.getElementById("optOut");
 const summaryCardsEl = document.getElementById("summaryCards");
 const siloTableWrapEl = document.getElementById("siloTableWrap");
 const upcomingLotsWrapEl = document.getElementById("upcomingLotsWrap");
+const incomingLotsWrapEl = document.getElementById("incomingLotsWrap");
 const stateLedgerWrapEl = document.getElementById("stateLedgerWrap");
 const remainingFocusWrapEl = document.getElementById("remainingFocusWrap");
 const contributionWrapEl = document.getElementById("contributionWrap");
 const runStatusEl = document.getElementById("runStatus");
 const candidateTableWrapEl = document.getElementById("candidateTableWrap");
-const changeSummaryWrapEl = document.getElementById("changeSummaryWrap");
-const scenarioCompareWrapEl = document.getElementById("scenarioCompareWrap");
-const explainabilityWrapEl = document.getElementById("explainabilityWrap");
-const convergenceWrapEl = document.getElementById("convergenceWrap");
 const optPresetEl = document.getElementById("opt_preset");
 const optSeedEl = document.getElementById("opt_seed");
 const candidateSortEl = document.getElementById("candidateSort");
 const optimizeBtn = document.getElementById("optimizeBtn");
 const runBtn = document.getElementById("runBtn");
-const applyDischargeBtn = document.getElementById("applyDischargeBtn");
 
 const kpiValidationEl = document.getElementById("kpiValidation");
 const kpiDischargedEl = document.getElementById("kpiDischarged");
 const kpiRemainingEl = document.getElementById("kpiRemaining");
-const kpiObjectiveEl = document.getElementById("kpiObjective");
 
 const stepInput = document.getElementById("stepInput");
 const stepRun = document.getElementById("stepRun");
@@ -234,13 +229,13 @@ function renderSiloFillTable(summary) {
 
 function renderUpcomingLots(payload) {
   const layers = payload.layers || [];
-  const map = new Map();
+  const loadedMap = new Map();
   layers.forEach((r) => {
     const key = `${r.lot_id}__${r.supplier}`;
-    const prev = map.get(key) || 0;
-    map.set(key, prev + Number(r.segment_mass_kg || 0));
+    const prev = loadedMap.get(key) || 0;
+    loadedMap.set(key, prev + Number(r.segment_mass_kg || 0));
   });
-  const rows = Array.from(map.entries())
+  const loadedRows = Array.from(loadedMap.entries())
     .map(([k, mass]) => {
       const [lotId, supplier] = k.split("__");
       return `<tr><td>${lotId}</td><td>${supplier}</td><td>${mass.toFixed(3)}</td></tr>`;
@@ -248,8 +243,27 @@ function renderUpcomingLots(payload) {
     .join("");
   upcomingLotsWrapEl.innerHTML = `
     <table>
-      <thead><tr><th>Lot</th><th>Supplier</th><th>Total Planned (kg)</th></tr></thead>
-      <tbody>${rows}</tbody>
+      <thead><tr><th>Lot</th><th>Supplier</th><th>Total Loaded (kg)</th></tr></thead>
+      <tbody>${loadedRows}</tbody>
+    </table>
+  `;
+
+  const incoming = payload.incoming_queue || [];
+  const incomingRows = incoming
+    .map((item) => {
+      if (typeof item === "string") {
+        return `<tr><td>${item}</td><td>-</td><td>-</td></tr>`;
+      }
+      const lotId = String(item?.lot_id ?? item?.lot ?? "");
+      const supplier = String(item?.supplier ?? "-");
+      const mass = Number(item?.mass_kg ?? item?.remaining_mass_kg ?? 0);
+      return `<tr><td>${lotId}</td><td>${supplier}</td><td>${mass.toFixed(3)}</td></tr>`;
+    })
+    .join("");
+  incomingLotsWrapEl.innerHTML = `
+    <table>
+      <thead><tr><th>Lot</th><th>Supplier</th><th>Mass (kg)</th></tr></thead>
+      <tbody>${incomingRows || "<tr><td colspan='3'>No incoming lots</td></tr>"}</tbody>
     </table>
   `;
 }
@@ -327,13 +341,11 @@ function renderContributionBars(result) {
 
 function renderCandidateTable(payload) {
   const candidates = (payload?.top_candidates || []).slice();
-  const sortKey = candidateSortEl?.value || "score";
+  const sortKey = candidateSortEl?.value || "discharged";
   if (sortKey === "discharged") {
     candidates.sort(
       (a, b) => Number(b.total_discharged_mass_kg || 0) - Number(a.total_discharged_mass_kg || 0)
     );
-  } else {
-    candidates.sort((a, b) => Number(a.objective_score || 0) - Number(b.objective_score || 0));
   }
 
   if (!candidates.length) {
@@ -345,7 +357,6 @@ function renderCandidateTable(payload) {
       (c, idx) => `
     <tr>
       <td>${idx + 1}</td>
-      <td>${Number(c.objective_score).toFixed(6)}</td>
       <td>${Number(c.total_discharged_mass_kg).toFixed(3)}</td>
       <td>${(c.recommended_discharge || []).map((r) => `${r.silo_id}:${Number(r.discharge_fraction).toFixed(3)}`).join(" | ")}</td>
       <td><button class="btn btn-alt candidate-discharge-btn" data-candidate-index="${idx}">Discharge</button></td>
@@ -358,7 +369,6 @@ function renderCandidateTable(payload) {
       <thead>
         <tr>
           <th>Rank</th>
-          <th>Score</th>
           <th>Discharged (kg)</th>
           <th>Recommended Fractions</th>
           <th>Action</th>
@@ -369,107 +379,6 @@ function renderCandidateTable(payload) {
   `;
 }
 
-function renderChangeSummary(baselineRun, optimizePayload) {
-  if (!baselineRun || !optimizePayload?.recommended_discharge) {
-    changeSummaryWrapEl.innerHTML = "Run simulation first, then optimize to view changes.";
-    return;
-  }
-  const baseMap = {};
-  for (const [id, v] of Object.entries(baselineRun.per_silo || {})) {
-    baseMap[id] = Number(v.discharged_mass_kg || 0);
-  }
-  const rows = optimizePayload.recommended_discharge.map((r) => {
-    const baseMass = Number(baseMap[r.silo_id] || 0);
-    const frac = Number(r.discharge_fraction || 0);
-    const changedText = `baseline discharged ${baseMass.toFixed(3)}kg -> target fraction ${(frac * 100).toFixed(1)}%`;
-    return `<div class="change-line"><span class="change-key">${r.silo_id}</span><span class="change-value">${changedText}</span></div>`;
-  });
-  rows.push(
-    `<div class="change-line"><span class="change-key">Objective</span><span class="change-value">${Number(
-      optimizePayload.objective_score || 0
-    ).toFixed(6)}</span></div>`
-  );
-  changeSummaryWrapEl.innerHTML = rows.join("");
-}
-
-function renderScenarioCompare(baselineRun, optimizedRun) {
-  if (!baselineRun || !optimizedRun) {
-    scenarioCompareWrapEl.innerHTML = "Run simulation and optimization to compare scenarios.";
-    return;
-  }
-  const base = baselineRun.total_blended_params || {};
-  const opt = optimizedRun.total_blended_params || {};
-  const keys = Array.from(new Set([...Object.keys(base), ...Object.keys(opt)])).sort();
-
-  const baseLines = [];
-  const optLines = [];
-  keys.forEach((k) => {
-    const b = Number(base[k] || 0);
-    const o = Number(opt[k] || 0);
-    const d = o - b;
-    const dClass = d >= 0 ? "compare-delta-pos" : "compare-delta-neg";
-    baseLines.push(
-      `<div class="compare-line"><span class="compare-k">${k}</span><span class="compare-v">${b.toFixed(4)}</span></div>`
-    );
-    optLines.push(
-      `<div class="compare-line"><span class="compare-k">${k}</span><span class="compare-v">${o.toFixed(4)} <span class="${dClass}">(${d >= 0 ? "+" : ""}${d.toFixed(4)})</span></span></div>`
-    );
-  });
-
-  scenarioCompareWrapEl.innerHTML = `
-    <div>
-      <div class="compare-col-title">Baseline Run</div>
-      ${baseLines.join("")}
-    </div>
-    <div>
-      <div class="compare-col-title">Optimized Run</div>
-      ${optLines.join("")}
-    </div>
-  `;
-}
-
-function renderExplainability(optimizePayload) {
-  if (!optimizePayload) {
-    explainabilityWrapEl.innerHTML = "Optimization explainability details will appear after optimize.";
-    return;
-  }
-  const ranges = optimizePayload.param_ranges || {};
-  const lines = [
-    `<div class="explain-line"><span>Objective Method</span><span>${optimizePayload.objective_method || "n/a"}</span></div>`,
-    `<div class="explain-line"><span>Iterations</span><span>${Number(optimizePayload.iterations || 0)}</span></div>`,
-    `<div class="explain-line"><span>Score</span><span>${Number(optimizePayload.objective_score || 0).toFixed(6)}</span></div>`,
-  ];
-  Object.entries(ranges).forEach(([k, v]) => {
-    lines.push(
-      `<div class="explain-line"><span>Scale: ${k}</span><span>${Number(v).toFixed(4)}</span></div>`
-    );
-  });
-  explainabilityWrapEl.innerHTML = lines.join("");
-}
-
-function renderConvergence(optimizePayload) {
-  const top = optimizePayload?.top_candidates || [];
-  if (!top.length) {
-    convergenceWrapEl.innerHTML = "Convergence snapshot will appear after optimize.";
-    return;
-  }
-  const scores = top.map((c) => Number(c.objective_score || 0)).filter(Number.isFinite);
-  if (!scores.length) {
-    convergenceWrapEl.innerHTML = "No convergence data available.";
-    return;
-  }
-  const best = Math.min(...scores);
-  const worst = Math.max(...scores);
-  const mean = scores.reduce((a, b) => a + b, 0) / scores.length;
-  convergenceWrapEl.innerHTML = `
-    <div class="convergence-line"><span>Top Candidates Count</span><span>${scores.length}</span></div>
-    <div class="convergence-line"><span>Best Score</span><span>${best.toFixed(6)}</span></div>
-    <div class="convergence-line"><span>Worst Score</span><span>${worst.toFixed(6)}</span></div>
-    <div class="convergence-line"><span>Mean Score</span><span>${mean.toFixed(6)}</span></div>
-    <div class="convergence-line"><span>Spread</span><span>${(worst - best).toFixed(6)}</span></div>
-  `;
-}
-
 async function loadSample() {
   setStepState(stepInput, statusInput, "is-active", "Loading");
   const r = await fetch("/api/sample");
@@ -477,10 +386,6 @@ async function loadSample() {
   payloadEl.value = JSON.stringify(payload, null, 2);
   renderUpcomingLots(payload);
   candidateTableWrapEl.innerHTML = "";
-  changeSummaryWrapEl.innerHTML = "Run simulation first, then optimize to view changes.";
-  scenarioCompareWrapEl.innerHTML = "Run simulation and optimization to compare scenarios.";
-  explainabilityWrapEl.innerHTML = "Optimization explainability details will appear after optimize.";
-  convergenceWrapEl.innerHTML = "Convergence snapshot will appear after optimize.";
   lastRunResult = null;
   lastOptimizePayload = null;
   validationOutEl.innerHTML = "";
@@ -589,7 +494,10 @@ async function runSimulation() {
     kpiDischargedEl.textContent = Number(0).toFixed(3);
     kpiRemainingEl.textContent = totalRemaining.toFixed(3);
     renderSiloFillTable(summary);
-    renderUpcomingLots({ layers: state.layers || [] });
+    renderUpcomingLots({
+      layers: state.layers || [],
+      incoming_queue: state.incoming_queue || [],
+    });
     summaryCardsEl.innerHTML = `
       <div class="card"><div class="card-key">Total Capacity (kg)</div><div class="card-value">${totalCapacity.toFixed(3)}</div></div>
       <div class="card"><div class="card-key">Current Inventory (kg)</div><div class="card-value">${totalUsed.toFixed(3)}</div></div>
@@ -676,26 +584,17 @@ async function optimizeBlend() {
       if (optimizeBtn) optimizeBtn.disabled = false;
       return;
     }
-    const bestRun = data.best_run || {};
     // Optimization is advisory only; do not mutate current fill-state visuals.
     renderCandidateTable(data);
-    renderChangeSummary(lastRunResult, data);
-    renderScenarioCompare(lastRunResult, bestRun);
-    renderExplainability(data);
-    renderConvergence(data);
     lastOptimizePayload = data;
-
-    const score = Number(data.objective_score);
-    kpiObjectiveEl.textContent = Number.isFinite(score) ? score.toFixed(6) : "N/A";
 
     const top = data.top_candidates || [];
     const lines = [];
     lines.push(`Method: ${data.objective_method}`);
-    lines.push(`Best score: ${Number(data.objective_score).toFixed(6)}`);
     lines.push("Top candidates:");
     top.forEach((c, i) => {
       lines.push(
-        `${i + 1}. score=${Number(c.objective_score).toFixed(6)} discharged=${Number(c.total_discharged_mass_kg).toFixed(3)}kg`
+        `${i + 1}. discharged=${Number(c.total_discharged_mass_kg).toFixed(3)}kg`
       );
     });
     lines.push("");
@@ -788,6 +687,7 @@ async function applyCandidateDischarge(candidateIndex) {
     );
     renderUpcomingLots({
       layers: data.state.layers || [],
+      incoming_queue: data.state.incoming_queue || [],
     });
   }
 }
@@ -796,11 +696,6 @@ document.getElementById("loadSampleBtn").addEventListener("click", loadSample);
 document.getElementById("validateBtn").addEventListener("click", validatePayload);
 document.getElementById("runBtn").addEventListener("click", runSimulation);
 if (optimizeBtn) optimizeBtn.addEventListener("click", optimizeBlend);
-if (applyDischargeBtn) {
-  applyDischargeBtn.addEventListener("click", () => {
-    printRaw("Use the Discharge button on a candidate row.");
-  });
-}
 if (optPresetEl) {
   optPresetEl.addEventListener("change", () => {
     const mode = optPresetEl.value;
@@ -842,11 +737,6 @@ setStepState(stepResults, statusResults, "", "Pending");
 setStepState(stepOptimize, statusOptimize, "", "Pending");
 runStatusEl.className = "run-status";
 runStatusEl.textContent = "Simulation not started.";
-changeSummaryWrapEl.innerHTML = "Run simulation first, then optimize to view changes.";
-scenarioCompareWrapEl.innerHTML = "Run simulation and optimization to compare scenarios.";
-explainabilityWrapEl.innerHTML = "Optimization explainability details will appear after optimize.";
-convergenceWrapEl.innerHTML = "Convergence snapshot will appear after optimize.";
-kpiObjectiveEl.textContent = "N/A";
 printRaw("UI ready. Load sample, validate inputs, run, then optimize.");
 
 scheduleInitialSampleLoad();

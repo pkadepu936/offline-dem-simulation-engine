@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>DEM Blend Studio</title>
-  <link rel="stylesheet" href="/ui/styles.css" />
+  <link rel="stylesheet" href="/ui/styles.css?v=2" />
 </head>
 <body>
   <a class="skip-link" href="#mainContent">Skip to Main Content</a>
@@ -35,10 +35,6 @@
         <div class="kpi-key">Remaining (kg)</div>
         <div class="kpi-value" id="kpiRemaining">0.000</div>
       </article>
-      <article class="kpi-card">
-        <div class="kpi-key">Objective Score</div>
-        <div class="kpi-value" id="kpiObjective">N/A</div>
-      </article>
     </section>
 
     <main class="layout" id="mainContent">
@@ -51,8 +47,10 @@
               <div class="step-status" id="statusInput" aria-live="polite">Pending</div>
             </div>
           </div>
-          <div class="panel-title">Upcoming Lots</div>
+          <div class="panel-title">Loaded Lots</div>
           <div id="upcomingLotsWrap"></div>
+          <div class="panel-title top-gap">Incoming Lots</div>
+          <div id="incomingLotsWrap"></div>
           <div id="assumptionNote" class="top-gap"></div>
           <div class="panel-title top-gap">Whole-Lot Assumptions</div>
           <div class="target-grid">
@@ -129,26 +127,14 @@
             <label>Seed <input id="opt_seed" type="number" step="1" value="42" /></label>
           </div>
           <div class="panel-title top-gap">Top Candidates</div>
-          <div class="top-gap">
-            <button id="applyDischargeBtn" class="btn btn-alt">Apply Discharge (Best Candidate)</button>
-          </div>
           <div id="candidateControls" class="candidate-controls">
             <label>Sort by
               <select id="candidateSort">
-                <option value="score" selected>Objective Score</option>
-                <option value="discharged">Discharged Mass</option>
+                <option value="discharged" selected>Discharged Mass</option>
               </select>
             </label>
           </div>
           <div id="candidateTableWrap"></div>
-          <div class="panel-title top-gap">What Changed</div>
-          <div id="changeSummaryWrap" class="change-summary"></div>
-          <div class="panel-title top-gap">Scenario Compare</div>
-          <div id="scenarioCompareWrap" class="compare-grid"></div>
-          <div class="panel-title top-gap">Explainability</div>
-          <div id="explainabilityWrap" class="explain-card"></div>
-          <div class="panel-title top-gap">Convergence Snapshot</div>
-          <div id="convergenceWrap" class="convergence-card"></div>
           <div class="panel-title top-gap">Optimization Result</div>
           <pre id="optOut" role="region" aria-label="Optimization Output"></pre>
         </article>
@@ -161,6 +147,6 @@
     </main>
   </div>
 
-  <script src="/ui/app.js?v=4"></script>
+  <script src="/ui/app.js?v=6"></script>
 </body>
 </html>

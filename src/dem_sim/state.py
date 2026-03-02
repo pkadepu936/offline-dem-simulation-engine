@@ -312,10 +312,9 @@ def apply_discharge_to_state(discharge_by_silo: dict[str, float]) -> dict[str, A
                 mass_after = mass - take
                 remaining -= take
                 total_removed += take
-                if mass_after > 1e-12:
-                    layer["remaining_mass_kg"] = round(mass_after, 6)
-                    layer["segment_mass_kg"] = round(mass_after, 6)
-                    kept.append(layer)
+                layer["remaining_mass_kg"] = round(max(0.0, mass_after), 6)
+                layer["segment_mass_kg"] = round(max(0.0, mass_after), 6)
+                kept.append(layer)
             for idx, layer in enumerate(kept, start=1):
                 layer["layer_index"] = idx
                 new_layers.append(layer)
