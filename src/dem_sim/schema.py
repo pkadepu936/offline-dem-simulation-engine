@@ -17,6 +17,7 @@ CREATE TABLE IF NOT EXISTS silos (
 CREATE TABLE IF NOT EXISTS layers (
     id BIGSERIAL PRIMARY KEY,
     silo_id TEXT NOT NULL REFERENCES silos(silo_id) ON DELETE CASCADE,
+    sim_event_id BIGINT,
     snapshot_id BIGINT NOT NULL DEFAULT 1,
     event_type TEXT NOT NULL DEFAULT 'snapshot',
     captured_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -89,6 +90,7 @@ CREATE TABLE IF NOT EXISTS results_run (
 
 CREATE TABLE IF NOT EXISTS results_optimize (
     id BIGSERIAL PRIMARY KEY,
+    sim_event_id BIGINT,
     timestamp TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     objective_score DOUBLE PRECISION NOT NULL,
     recommended_discharge JSONB NOT NULL DEFAULT '[]'::jsonb,
@@ -99,6 +101,7 @@ CREATE TABLE IF NOT EXISTS results_optimize (
 
 CREATE TABLE IF NOT EXISTS discharge_results (
     id BIGSERIAL PRIMARY KEY,
+    sim_event_id BIGINT,
     timestamp TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     discharge_by_silo JSONB NOT NULL DEFAULT '{}'::jsonb,
     predicted_run JSONB NOT NULL DEFAULT '{}'::jsonb,
@@ -138,9 +141,12 @@ def ensure_schema() -> None:
             conn.execute("ALTER TABLE incoming_queue ADD COLUMN IF NOT EXISTS is_fully_consumed BOOLEAN NOT NULL DEFAULT FALSE")
             conn.execute("UPDATE incoming_queue SET remaining_mass_kg = mass_kg WHERE remaining_mass_kg IS NULL")
             conn.execute("ALTER TABLE layers ADD COLUMN IF NOT EXISTS snapshot_id BIGINT NOT NULL DEFAULT 1")
+            conn.execute("ALTER TABLE layers ADD COLUMN IF NOT EXISTS sim_event_id BIGINT")
             conn.execute("ALTER TABLE layers ADD COLUMN IF NOT EXISTS event_type TEXT NOT NULL DEFAULT 'snapshot'")
             conn.execute("ALTER TABLE layers ADD COLUMN IF NOT EXISTS captured_at TIMESTAMPTZ NOT NULL DEFAULT NOW()")
             conn.execute("ALTER TABLE layers ADD COLUMN IF NOT EXISTS loaded_mass DOUBLE PRECISION")
+            conn.execute("ALTER TABLE discharge_results ADD COLUMN IF NOT EXISTS sim_event_id BIGINT")
+            conn.execute("ALTER TABLE results_optimize ADD COLUMN IF NOT EXISTS sim_event_id BIGINT")
             conn.execute(
                 """
                 DO $$
@@ -162,3 +168,6 @@ def ensure_schema() -> None:
             conn.execute("DROP TABLE IF EXISTS layers_history")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_layers_snapshot_id ON layers(snapshot_id)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_layers_captured_at ON layers(captured_at DESC)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_layers_sim_event_id ON layers(sim_event_id)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_discharge_results_sim_event_id ON discharge_results(sim_event_id)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_results_optimize_sim_event_id ON results_optimize(sim_event_id)")

@@ -191,7 +191,7 @@ function renderSiloFillTable(summary) {
           .filter((l) => Number(l.remaining_mass_kg || 0) > 0.5)
           .map(
             (l) =>
-              `${Number(l.layer_index || 0)}:${String(l.lot_id || "")}(${Number(
+              `${Number(l.current_layer_index ?? l.layer_index ?? 0)}:${String(l.lot_id || "")}(${Number(
                 l.remaining_mass_kg || 0
               ).toFixed(0)})`
           )

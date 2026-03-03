@@ -202,6 +202,14 @@ def summarize_state() -> dict[str, Any]:
             rec["remaining_kg"] = max(0.0, remaining)
             pct = (rec["remaining_kg"] / cap * 100.0) if cap > 0 else 0.0
             rec["remaining_pct"] = max(0.0, min(100.0, pct))
+            # Current-position indexing: compact 1..N over active layers only.
+            active_lots = [
+                lot for lot in rec["lots"] if float(lot.get("remaining_mass_kg", 0.0)) > 1e-9
+            ]
+            active_lots.sort(key=lambda lot: int(lot.get("layer_index", 0)))
+            for idx, lot in enumerate(active_lots, start=1):
+                lot["current_layer_index"] = idx
+            rec["lots"] = active_lots
         queue = deepcopy(STATE["incoming_queue"])
         return {
             "silos": list(by_silo.values()),

@@ -111,7 +111,9 @@ def _sync_incoming_queue_to_db(state_queue: list[dict[str, Any]]) -> None:
         )
 
 
-def _sync_layers_to_db(state: dict[str, Any], event_type: str) -> None:
+def _sync_layers_to_db(
+    state: dict[str, Any], event_type: str, sim_event_id: int | None = None
+) -> None:
     # Persist current fill-state layers as an append-only snapshot in `layers`.
     # Discharge sync is intentionally separate.
     silos = [str(s.get("silo_id", "")) for s in state.get("silos", []) if str(s.get("silo_id", ""))]
@@ -139,12 +141,13 @@ def _sync_layers_to_db(state: dict[str, Any], event_type: str) -> None:
                     conn.execute(
                         """
                         INSERT INTO layers (
-                            silo_id, snapshot_id, event_type, layer_index, lot_id, supplier, loaded_mass
+                            silo_id, sim_event_id, snapshot_id, event_type, layer_index, lot_id, supplier, loaded_mass
                         )
-                        VALUES (%s, %s, %s, %s, %s, %s, %s)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                         """,
                         (
                             sid,
+                            sim_event_id,
                             snapshot_id,
                             event_type,
                             idx,
@@ -194,44 +197,51 @@ def _write_sim_event(
     incoming_queue_mass_kg: float | None = None,
     objective_score: float | None = None,
     meta: dict[str, Any] | None = None,
-) -> None:
+) -> int | None:
     try:
         # Ensure consolidated tracking table exists before insert.
         ensure_db_schema()
-        execute(
-            """
-            INSERT INTO sim_events (
-                event_type,
-                action,
-                state_before,
-                state_after,
-                discharge_by_silo,
-                total_discharged_mass_kg,
-                total_remaining_mass_kg,
-                incoming_queue_count,
-                incoming_queue_mass_kg,
-                objective_score,
-                meta
-            )
-            VALUES (%s, %s, %s::jsonb, %s::jsonb, %s::jsonb, %s, %s, %s, %s, %s, %s::jsonb)
-            """,
-            (
-                event_type,
-                action,
-                json.dumps(state_before or {}),
-                json.dumps(state_after or {}),
-                json.dumps(discharge_by_silo or {}),
-                total_discharged_mass_kg,
-                total_remaining_mass_kg,
-                incoming_queue_count,
-                incoming_queue_mass_kg,
-                objective_score,
-                json.dumps(meta or {}),
-            ),
-        )
+        with get_conn() as conn:
+            with conn.transaction():
+                row = conn.execute(
+                    """
+                    INSERT INTO sim_events (
+                        event_type,
+                        action,
+                        state_before,
+                        state_after,
+                        discharge_by_silo,
+                        total_discharged_mass_kg,
+                        total_remaining_mass_kg,
+                        incoming_queue_count,
+                        incoming_queue_mass_kg,
+                        objective_score,
+                        meta
+                    )
+                    VALUES (%s, %s, %s::jsonb, %s::jsonb, %s::jsonb, %s, %s, %s, %s, %s, %s::jsonb)
+                    RETURNING id
+                    """,
+                    (
+                        event_type,
+                        action,
+                        json.dumps(state_before or {}),
+                        json.dumps(state_after or {}),
+                        json.dumps(discharge_by_silo or {}),
+                        total_discharged_mass_kg,
+                        total_remaining_mass_kg,
+                        incoming_queue_count,
+                        incoming_queue_mass_kg,
+                        objective_score,
+                        json.dumps(meta or {}),
+                    ),
+                ).fetchone()
+                if row:
+                    return int(row.get("id"))
+        return None
     except Exception as e:
         # Keep request flow alive, but emit a visible diagnostic instead of silent drop.
         print(f"[sim_events] insert failed: {e}")
+        return None
 
 
 class RunRequest(BaseModel):
@@ -718,11 +728,7 @@ def create_app() -> FastAPI:
             _sync_incoming_queue_to_db(out["state"].get("incoming_queue", []))
         except Exception as e:
             print(f"[state_reset] incoming_queue sync failed: {e}")
-        try:
-            _sync_layers_to_db(out["state"], event_type="state_reset")
-        except Exception as e:
-            print(f"[state_reset] layers sync failed: {e}")
-        _write_sim_event(
+        sim_event_id = _write_sim_event(
             event_type="state_reset",
             action="state_reset_to_sample",
             state_after=out.get("state", {}),
@@ -730,6 +736,10 @@ def create_app() -> FastAPI:
             incoming_queue_mass_kg=float(out.get("summary", {}).get("incoming_queue", {}).get("total_mass_kg", 0.0)),
             meta={"source": "state_reset"},
         )
+        try:
+            _sync_layers_to_db(out["state"], event_type="state_reset", sim_event_id=sim_event_id)
+        except Exception as e:
+            print(f"[state_reset] layers sync failed: {e}")
         return out
 
     @app.post("/api/process/run_simulation")
@@ -745,11 +755,7 @@ def create_app() -> FastAPI:
             _sync_incoming_queue_to_db(out["state"].get("incoming_queue", []))
         except Exception as e:
             print(f"[run_simulation_fill_only] incoming_queue sync failed: {e}")
-        try:
-            _sync_layers_to_db(out["state"], event_type="run_simulation_fill_only")
-        except Exception as e:
-            print(f"[run_simulation_fill_only] layers sync failed: {e}")
-        _write_sim_event(
+        sim_event_id = _write_sim_event(
             event_type="run_simulation_fill_only",
             action="run_simulation_fill_only",
             state_before=before_state,
@@ -760,6 +766,14 @@ def create_app() -> FastAPI:
             incoming_queue_mass_kg=float(after_summary.get("incoming_queue", {}).get("total_mass_kg", 0.0)),
             meta={"source": "process_run_simulation"},
         )
+        try:
+            _sync_layers_to_db(
+                out["state"],
+                event_type="run_simulation_fill_only",
+                sim_event_id=sim_event_id,
+            )
+        except Exception as e:
+            print(f"[run_simulation_fill_only] layers sync failed: {e}")
         # Intentionally do not call _persist_state_bundle here; use sim_events only.
         return out
 
@@ -855,31 +869,7 @@ def create_app() -> FastAPI:
             meta={"discharge_by_silo": discharge_by_silo},
         )
         out = {"state": updated, "summary": after, "predicted_run": predicted}
-        try:
-            execute(
-                """
-                INSERT INTO discharge_results (
-                    discharge_by_silo,
-                    predicted_run,
-                    summary_before,
-                    summary_after
-                )
-                VALUES (%s::jsonb, %s::jsonb, %s::jsonb, %s::jsonb)
-                """,
-                (
-                    json.dumps(discharge_by_silo),
-                    json.dumps(predicted),
-                    json.dumps(before),
-                    json.dumps(after),
-                ),
-            )
-        except Exception as e:
-            print(f"[apply_discharge] discharge_results insert failed: {e}")
-        try:
-            _sync_layers_to_db(updated, event_type="apply_discharge")
-        except Exception as e:
-            print(f"[apply_discharge] layers sync failed: {e}")
-        _write_sim_event(
+        sim_event_id = _write_sim_event(
             event_type="apply_discharge",
             action="apply_discharge",
             state_before=before_state,
@@ -891,6 +881,32 @@ def create_app() -> FastAPI:
             incoming_queue_mass_kg=float(after.get("incoming_queue", {}).get("total_mass_kg", 0.0)),
             meta={"source": "process_apply_discharge"},
         )
+        try:
+            execute(
+                """
+                INSERT INTO discharge_results (
+                    sim_event_id,
+                    discharge_by_silo,
+                    predicted_run,
+                    summary_before,
+                    summary_after
+                )
+                VALUES (%s, %s::jsonb, %s::jsonb, %s::jsonb, %s::jsonb)
+                """,
+                (
+                    sim_event_id,
+                    json.dumps(discharge_by_silo),
+                    json.dumps(predicted),
+                    json.dumps(before),
+                    json.dumps(after),
+                ),
+            )
+        except Exception as e:
+            print(f"[apply_discharge] discharge_results insert failed: {e}")
+        try:
+            _sync_layers_to_db(updated, event_type="apply_discharge", sim_event_id=sim_event_id)
+        except Exception as e:
+            print(f"[apply_discharge] layers sync failed: {e}")
         _persist_result("apply_discharge_predicted", predicted, payload={"discharge_by_silo": discharge_by_silo})
         # Intentionally do not call _persist_state_bundle here; use sim_events/discharge tables.
         return out
@@ -928,6 +944,17 @@ def create_app() -> FastAPI:
         cfg = RunConfig(**req.config)
         result = run_blend(inputs, cfg)
         out = _result_to_api_payload(result)
+        sim_event_id = _write_sim_event(
+            event_type="run",
+            action="run",
+            state_before={},
+            state_after={},
+            total_discharged_mass_kg=float(out.get("total_discharged_mass_kg", 0.0)),
+            total_remaining_mass_kg=float(out.get("total_remaining_mass_kg", 0.0)),
+            incoming_queue_count=None,
+            incoming_queue_mass_kg=None,
+            meta={"source": "api_run"},
+        )
         try:
             seg = result.get("df_segment_state_ledger")
             if seg is not None and not seg.empty:
@@ -944,20 +971,10 @@ def create_app() -> FastAPI:
                 _sync_layers_to_db(
                     state={"silos": req.silos, "layers": run_layers},
                     event_type="run_simulation",
+                    sim_event_id=sim_event_id,
                 )
         except Exception:
             pass
-        _write_sim_event(
-            event_type="run",
-            action="run",
-            state_before={},
-            state_after={},
-            total_discharged_mass_kg=float(out.get("total_discharged_mass_kg", 0.0)),
-            total_remaining_mass_kg=float(out.get("total_remaining_mass_kg", 0.0)),
-            incoming_queue_count=None,
-            incoming_queue_mass_kg=None,
-            meta={"source": "api_run"},
-        )
         _persist_result("run", out, payload=req.model_dump())
         return out
 
@@ -1083,19 +1100,29 @@ def create_app() -> FastAPI:
             "param_ranges": DEFAULT_PARAM_RANGES,
             "top_candidates": top_candidates,
         }
+        sim_event_id = _write_sim_event(
+            event_type="optimize",
+            action="optimize",
+            total_discharged_mass_kg=float(out.get("best_run", {}).get("total_discharged_mass_kg", 0.0)),
+            total_remaining_mass_kg=float(out.get("best_run", {}).get("total_remaining_mass_kg", 0.0)),
+            objective_score=float(out.get("objective_score", 0.0)),
+            meta={"source": "api_optimize"},
+        )
         try:
             execute(
                 """
                 INSERT INTO results_optimize (
+                    sim_event_id,
                     objective_score,
                     recommended_discharge,
                     target_params,
                     top_candidates,
                     best_run
                 )
-                VALUES (%s, %s::jsonb, %s::jsonb, %s::jsonb, %s::jsonb)
+                VALUES (%s, %s, %s::jsonb, %s::jsonb, %s::jsonb, %s::jsonb)
                 """,
                 (
+                    sim_event_id,
                     float(out["objective_score"]),
                     json.dumps(out["recommended_discharge"]),
                     json.dumps(out["target_params"]),
@@ -1105,14 +1132,6 @@ def create_app() -> FastAPI:
             )
         except Exception:
             pass
-        _write_sim_event(
-            event_type="optimize",
-            action="optimize",
-            total_discharged_mass_kg=float(out.get("best_run", {}).get("total_discharged_mass_kg", 0.0)),
-            total_remaining_mass_kg=float(out.get("best_run", {}).get("total_remaining_mass_kg", 0.0)),
-            objective_score=float(out.get("objective_score", 0.0)),
-            meta={"source": "api_optimize"},
-        )
         _persist_result("optimize", out, payload=req.model_dump())
         return out
 
