@@ -44,6 +44,36 @@ _STORAGE = get_storage()
 _STORAGE_READY = False
 
 
+def _suppliers_from_incoming_queue_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Build supplier specs from incoming_queue-like rows only."""
+    def _alias_float(row: dict[str, Any], *keys: str) -> float:
+        for key in keys:
+            if key in row and row.get(key) is not None:
+                try:
+                    return float(row.get(key) or 0.0)
+                except Exception:
+                    continue
+        return 0.0
+
+    supplier_agg: dict[str, dict[str, Any]] = {}
+    for r in rows:
+        supplier_name = str(r.get("supplier", ""))
+        if not supplier_name:
+            continue
+        if supplier_name in supplier_agg:
+            continue
+        supplier_agg[supplier_name] = {
+            "supplier": supplier_name,
+            "moisture_pct": float(r.get("moisture_pct", 0.0) or 0.0),
+            "fine_extract_db_pct": float(r.get("fine_extract_db_pct", 0.0) or 0.0),
+            "wort_pH": _alias_float(r, "wort_pH", "wort_ph"),
+            "diastatic_power_WK": _alias_float(r, "diastatic_power_WK", "diastatic_power_wk"),
+            "total_protein_pct": float(r.get("total_protein_pct", 0.0) or 0.0),
+            "wort_colour_EBC": _alias_float(r, "wort_colour_EBC", "wort_colour_ebc"),
+        }
+    return list(supplier_agg.values())
+
+
 def _ensure_storage_ready() -> None:
     global _STORAGE_READY
     if _STORAGE_READY:
@@ -281,6 +311,30 @@ def _sample_payload() -> dict[str, Any]:
                 suppliers = []
             if incoming_queue is None:
                 incoming_queue = []
+            # Always source incoming lots from DB incoming_queue (latest), not event snapshot.
+            queue_rows = fetchall(
+                """
+                SELECT *
+                FROM incoming_queue
+                ORDER BY id
+                """
+            )
+            incoming_queue_live = []
+            for qr in queue_rows:
+                base_mass_kg = float(qr.get("mass_kg", 0.0) or 0.0)
+                remaining_mass_kg = float(qr.get("remaining_mass_kg", base_mass_kg) or 0.0)
+                is_fully_consumed = bool(qr.get("is_fully_consumed", False))
+                if (remaining_mass_kg > 0) and (not is_fully_consumed):
+                    incoming_queue_live.append(
+                        {
+                            "lot_id": str(qr.get("lot_id", "")),
+                            "supplier": str(qr.get("supplier", "")),
+                            "mass_kg": remaining_mass_kg,
+                        }
+                    )
+            suppliers_from_queue = _suppliers_from_incoming_queue_rows(queue_rows)
+            if suppliers_from_queue:
+                suppliers = suppliers_from_queue
             return {
                 "silos": silos,
                 "layers": layers,
@@ -297,7 +351,7 @@ def _sample_payload() -> dict[str, Any]:
                     "silo_capacity_kg": float(sum(float(s.get("capacity_kg", 0.0)) for s in silos)),
                     "charging_policy": "sim_events_state_after",
                 },
-                "incoming_queue": incoming_queue,
+                "incoming_queue": incoming_queue_live,
                 "config": {
                     "rho_bulk_kg_m3": 610.0,
                     "grain_diameter_m": 0.004,
@@ -348,7 +402,6 @@ def _sample_payload() -> dict[str, Any]:
                 for r in silos_rows
             ]
             incoming_queue = []
-            supplier_agg: dict[str, dict[str, Any]] = {}
             for r in queue_rows:
                 supplier_name = str(r.get("supplier", ""))
                 lot_id = str(r.get("lot_id", ""))
@@ -359,20 +412,7 @@ def _sample_payload() -> dict[str, Any]:
                     incoming_queue.append(
                         {"lot_id": lot_id, "supplier": supplier_name, "mass_kg": remaining_mass_kg}
                     )
-                if not supplier_name:
-                    continue
-                # Supplier quality is denormalized on incoming_queue by design.
-                if supplier_name not in supplier_agg:
-                    supplier_agg[supplier_name] = {
-                        "supplier": supplier_name,
-                        "moisture_pct": float(r.get("moisture_pct", 0.0) or 0.0),
-                        "fine_extract_db_pct": float(r.get("fine_extract_db_pct", 0.0) or 0.0),
-                        "wort_pH": float(r.get("wort_pH", 0.0) or 0.0),
-                        "diastatic_power_WK": float(r.get("diastatic_power_WK", 0.0) or 0.0),
-                        "total_protein_pct": float(r.get("total_protein_pct", 0.0) or 0.0),
-                        "wort_colour_EBC": float(r.get("wort_colour_EBC", 0.0) or 0.0),
-                    }
-            suppliers = list(supplier_agg.values())
+            suppliers = _suppliers_from_incoming_queue_rows(queue_rows)
             layers = [
                 {
                     "silo_id": str(r.get("silo_id", "")),

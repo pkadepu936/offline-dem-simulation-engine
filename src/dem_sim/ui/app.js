@@ -231,11 +231,16 @@ function renderUpcomingLots(payload) {
   const layers = payload.layers || [];
   const loadedMap = new Map();
   layers.forEach((r) => {
+    const mass = Number(
+      r.remaining_mass_kg ?? r.loaded_mass ?? r.segment_mass_kg ?? 0
+    );
+    if (mass <= 0) return;
     const key = `${r.lot_id}__${r.supplier}`;
     const prev = loadedMap.get(key) || 0;
-    loadedMap.set(key, prev + Number(r.segment_mass_kg || 0));
+    loadedMap.set(key, prev + mass);
   });
   const loadedRows = Array.from(loadedMap.entries())
+    .filter(([, mass]) => Number(mass) > 0)
     .map(([k, mass]) => {
       const [lotId, supplier] = k.split("__");
       return `<tr><td>${lotId}</td><td>${supplier}</td><td>${mass.toFixed(3)}</td></tr>`;
@@ -692,7 +697,6 @@ async function applyCandidateDischarge(candidateIndex) {
   }
 }
 
-document.getElementById("loadSampleBtn").addEventListener("click", loadSample);
 document.getElementById("validateBtn").addEventListener("click", validatePayload);
 document.getElementById("runBtn").addEventListener("click", runSimulation);
 if (optimizeBtn) optimizeBtn.addEventListener("click", optimizeBlend);

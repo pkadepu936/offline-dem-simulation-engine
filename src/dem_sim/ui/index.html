@@ -15,7 +15,6 @@
         <p>Plan silo discharge, validate data health, run simulation, and optimize target blend.</p>
       </div>
       <div class="actions">
-        <button id="loadSampleBtn" class="btn">Load Sample</button>
         <button id="validateBtn" class="btn btn-alt">Validate Inputs</button>
         <button id="runBtn" class="btn btn-strong">Run Simulation</button>
         <button id="optimizeBtn" class="btn btn-opt">Optimize Blend</button>
@@ -51,16 +50,6 @@
           <div id="upcomingLotsWrap"></div>
           <div class="panel-title top-gap">Incoming Lots</div>
           <div id="incomingLotsWrap"></div>
-          <div id="assumptionNote" class="top-gap"></div>
-          <div class="panel-title top-gap">Whole-Lot Assumptions</div>
-          <div class="target-grid">
-            <label>Lot Size (kg) <input id="lotSizeKg" type="number" step="1" value="2000" /></label>
-            <label>Silo Slot Count <input id="siloSlotCount" type="number" step="1" value="4" /></label>
-            <label>Incoming Lots <input id="incomingLotsCount" type="number" step="1" value="100" /></label>
-          </div>
-          <div class="top-gap">
-            <button id="applyWholeLotBtn" class="btn btn-alt">Apply Whole-Lot Policy</button>
-          </div>
           <div class="panel-title top-gap">Validation Result</div>
           <div id="validationSummary" class="validation-summary" role="status" aria-live="polite">Run validation to check readiness.</div>
           <div id="validationOut" class="validation-list" role="region" aria-label="Validation Issues"></div>
@@ -147,6 +136,6 @@
     </main>
   </div>
 
-  <script src="/ui/app.js?v=6"></script>
+  <script src="/ui/app.js?v=8"></script>
 </body>
 </html>
