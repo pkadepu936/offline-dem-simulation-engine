@@ -17,6 +17,15 @@ const optSeedEl = document.getElementById("opt_seed");
 const candidateSortEl = document.getElementById("candidateSort");
 const optimizeBtn = document.getElementById("optimizeBtn");
 const runBtn = document.getElementById("runBtn");
+const tabStudioBtn = document.getElementById("tabStudioBtn");
+const tabScheduleBtn = document.getElementById("tabScheduleBtn");
+const tabPanels = Array.from(document.querySelectorAll("[data-tab-panel]"));
+const scheduleOutEl = document.getElementById("scheduleOut");
+const schedGenerateRandomBtn = document.getElementById("schedGenerateRandomBtn");
+const schedGenerateScheduleBtn = document.getElementById("schedGenerateScheduleBtn");
+const schedRunSimulationBtn = document.getElementById("schedRunSimulationBtn");
+const schedOptimizeBtn = document.getElementById("schedOptimizeBtn");
+const schedOptBrewIdEl = document.getElementById("sched_opt_brew_id");
 
 const kpiValidationEl = document.getElementById("kpiValidation");
 const kpiDischargedEl = document.getElementById("kpiDischarged");
@@ -35,6 +44,39 @@ let lastOptimizePayload = null;
 let isValidating = false;
 let isRunning = false;
 let isOptimizing = false;
+
+function setActiveTab(tabName) {
+  tabPanels.forEach((panel) => {
+    const active = panel.getAttribute("data-tab-panel") === tabName;
+    panel.classList.toggle("is-active", active);
+    panel.hidden = !active;
+  });
+  if (tabStudioBtn) {
+    const active = tabName === "studio";
+    tabStudioBtn.classList.toggle("is-active", active);
+    tabStudioBtn.setAttribute("aria-selected", String(active));
+  }
+  if (tabScheduleBtn) {
+    const active = tabName === "schedule";
+    tabScheduleBtn.classList.toggle("is-active", active);
+    tabScheduleBtn.setAttribute("aria-selected", String(active));
+  }
+}
+
+function printSchedule(data) {
+  if (!scheduleOutEl) return;
+  scheduleOutEl.textContent = typeof data === "string" ? data : JSON.stringify(data, null, 2);
+}
+
+function populateScheduleBrewSelect(items = []) {
+  if (!schedOptBrewIdEl) return;
+  const options = (items || [])
+    .map((item) => String(item?.brew_id || "").trim())
+    .filter(Boolean)
+    .map((brewId) => `<option value="${brewId}">${brewId}</option>`)
+    .join("");
+  schedOptBrewIdEl.innerHTML = options || '<option value="">No brews available</option>';
+}
 
 function printRaw(data) {
   rawOutEl.textContent = typeof data === "string" ? data : JSON.stringify(data, null, 2);
@@ -625,6 +667,146 @@ async function optimizeBlend() {
   }
 }
 
+async function generateRandomScheduleData() {
+  if (!schedGenerateRandomBtn) return;
+  try {
+    schedGenerateRandomBtn.disabled = true;
+    schedGenerateRandomBtn.textContent = "Generating...";
+    const seed = Number(document.getElementById("sched_seed")?.value || 42);
+    const silosCount = Number(document.getElementById("sched_silos_count")?.value || 3);
+    const lotsCount = Number(document.getElementById("sched_lots_count")?.value || 100);
+    const lotSizeKg = Number(document.getElementById("sched_lot_size_kg")?.value || 2000);
+
+    const r = await fetch("/api/data/generate-random", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        seed,
+        silos_count: silosCount,
+        lots_count: lotsCount,
+        lot_size_kg: lotSizeKg,
+      }),
+    });
+    const data = await r.json();
+    if (!r.ok) {
+      printSchedule(data);
+      printRaw(data);
+      return;
+    }
+    const payload = data.payload || {};
+    payloadEl.value = JSON.stringify(payload, null, 2);
+    renderUpcomingLots(payload);
+    candidateTableWrapEl.innerHTML = "";
+    lastRunResult = null;
+    lastOptimizePayload = null;
+    validationOutEl.innerHTML = "";
+    validationSummaryEl.textContent = "Random dataset generated. Run validation to check readiness.";
+    setValidationState(false, 0, 0);
+    setStepState(stepInput, statusInput, "is-active", "Loaded");
+    printSchedule(data);
+    printRaw(data);
+  } catch (e) {
+    printSchedule(`Generate random failed: ${String(e)}`);
+  } finally {
+    schedGenerateRandomBtn.disabled = false;
+    schedGenerateRandomBtn.textContent = "Generate Random";
+  }
+}
+
+async function generateSchedulePlan() {
+  if (!schedGenerateScheduleBtn) return;
+  try {
+    schedGenerateScheduleBtn.disabled = true;
+    schedGenerateScheduleBtn.textContent = "Generating...";
+    const scheduleId = String(document.getElementById("sched_schedule_id")?.value || "").trim();
+    const name = String(document.getElementById("sched_name")?.value || "MVP Brew Schedule").trim();
+    const brewsCount = Number(document.getElementById("sched_brews_count")?.value || 5);
+    const seed = Number(document.getElementById("sched_schedule_seed")?.value || 42);
+
+    const r = await fetch("/api/schedules/generate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        schedule_id: scheduleId || null,
+        name,
+        brews_count: brewsCount,
+        seed,
+        target_params: targetParamsFromUI(),
+      }),
+    });
+    const data = await r.json();
+    if (!r.ok) {
+      printSchedule(data);
+      printRaw(data);
+      return;
+    }
+    const resolvedScheduleId = String(data.schedule_id || "");
+    const schedOptScheduleIdEl = document.getElementById("sched_opt_schedule_id");
+    if (schedOptScheduleIdEl) schedOptScheduleIdEl.value = resolvedScheduleId;
+    populateScheduleBrewSelect(data.items || []);
+    printSchedule(data);
+    printRaw(data);
+  } catch (e) {
+    printSchedule(`Generate schedule failed: ${String(e)}`);
+  } finally {
+    schedGenerateScheduleBtn.disabled = false;
+    schedGenerateScheduleBtn.textContent = "Generate Schedule";
+  }
+}
+
+async function runSimulationFromScheduleTab() {
+  if (!schedRunSimulationBtn) return;
+  try {
+    schedRunSimulationBtn.disabled = true;
+    schedRunSimulationBtn.textContent = "Running...";
+    await runSimulation();
+    printSchedule("Run simulation complete. Check Studio tab for updated results.");
+  } catch (e) {
+    printSchedule(`Run simulation failed: ${String(e)}`);
+  } finally {
+    schedRunSimulationBtn.disabled = false;
+    schedRunSimulationBtn.textContent = "Run Simulation";
+  }
+}
+
+async function optimizeScheduleItemFromTab() {
+  if (!schedOptimizeBtn) return;
+  try {
+    schedOptimizeBtn.disabled = true;
+    schedOptimizeBtn.textContent = "Optimizing...";
+    const scheduleId = String(document.getElementById("sched_opt_schedule_id")?.value || "").trim();
+    const brewId = String(schedOptBrewIdEl?.value || "").trim();
+    const iterations = Number(document.getElementById("sched_opt_iterations")?.value || 120);
+    const seed = Number(document.getElementById("sched_opt_seed")?.value || 42);
+    if (!scheduleId || !brewId) {
+      throw new Error("schedule_id and brew_id are required for optimize schedule.");
+    }
+    const payloadSafe = safePayloadOrEmpty();
+    const r = await fetch(`/api/schedules/${encodeURIComponent(scheduleId)}/items/${encodeURIComponent(brewId)}/optimize`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ iterations, seed, config: payloadSafe.config || {} }),
+    });
+    const data = await r.json();
+    if (!r.ok) {
+      printSchedule(data);
+      printRaw(data);
+      return;
+    }
+    renderCandidateTable(data);
+    lastOptimizePayload = data;
+    optOutEl.textContent = JSON.stringify(data, null, 2);
+    setStepState(stepOptimize, statusOptimize, "is-success", "Complete");
+    printSchedule(data);
+    printRaw(data);
+  } catch (e) {
+    printSchedule(`Optimize schedule failed: ${String(e)}`);
+  } finally {
+    schedOptimizeBtn.disabled = false;
+    schedOptimizeBtn.textContent = "Optimize Schedule";
+  }
+}
+
 async function applyCandidateDischarge(candidateIndex) {
   if (!lastOptimizePayload?.top_candidates?.length) {
     printRaw("No optimization candidate available.");
@@ -704,6 +886,12 @@ async function applyCandidateDischarge(candidateIndex) {
 document.getElementById("validateBtn").addEventListener("click", validatePayload);
 document.getElementById("runBtn").addEventListener("click", runSimulation);
 if (optimizeBtn) optimizeBtn.addEventListener("click", optimizeBlend);
+if (tabStudioBtn) tabStudioBtn.addEventListener("click", () => setActiveTab("studio"));
+if (tabScheduleBtn) tabScheduleBtn.addEventListener("click", () => setActiveTab("schedule"));
+if (schedGenerateRandomBtn) schedGenerateRandomBtn.addEventListener("click", generateRandomScheduleData);
+if (schedGenerateScheduleBtn) schedGenerateScheduleBtn.addEventListener("click", generateSchedulePlan);
+if (schedRunSimulationBtn) schedRunSimulationBtn.addEventListener("click", runSimulationFromScheduleTab);
+if (schedOptimizeBtn) schedOptimizeBtn.addEventListener("click", optimizeScheduleItemFromTab);
 if (optPresetEl) {
   optPresetEl.addEventListener("change", () => {
     const mode = optPresetEl.value;
@@ -746,5 +934,6 @@ setStepState(stepOptimize, statusOptimize, "", "Pending");
 runStatusEl.className = "run-status";
 runStatusEl.textContent = "Simulation not started.";
 printRaw("UI ready. Load sample, validate inputs, run, then optimize.");
+printSchedule("Schedule tab ready. Generate random data, generate schedule, run simulation, then optimize a brew item.");
 
 scheduleInitialSampleLoad();
