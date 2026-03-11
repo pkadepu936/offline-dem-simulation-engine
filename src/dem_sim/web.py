@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import random
+import time
 from io import StringIO
 from math import isnan
 from pathlib import Path
@@ -11,6 +12,7 @@ from typing import Any
 import pandas as pd
 import uvicorn
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -334,17 +336,6 @@ def _generate_random_payload(
             }
         )
 
-    incoming_queue: list[dict[str, Any]] = []
-    for i in range(lots_count):
-        sup = suppliers[i % len(suppliers)]
-        incoming_queue.append(
-            {
-                "lot_id": f"LOT{i+1:03d}",
-                "supplier": sup,
-                "mass_kg": float(lot_size_kg),
-            }
-        )
-
     supplier_specs = {
         "BBM": {
             "supplier": "BBM",
@@ -375,6 +366,23 @@ def _generate_random_payload(
         },
     }
     suppliers_rows = [supplier_specs[s] for s in suppliers]
+    incoming_queue: list[dict[str, Any]] = []
+    for i in range(lots_count):
+        sup = suppliers[i % len(suppliers)]
+        spec = supplier_specs[sup]
+        incoming_queue.append(
+            {
+                "lot_id": f"LOT{i+1:03d}",
+                "supplier": sup,
+                "mass_kg": float(lot_size_kg),
+                "moisture_pct": float(spec["moisture_pct"]),
+                "fine_extract_db_pct": float(spec["fine_extract_db_pct"]),
+                "wort_pH": float(spec["wort_pH"]),
+                "diastatic_power_WK": float(spec["diastatic_power_WK"]),
+                "total_protein_pct": float(spec["total_protein_pct"]),
+                "wort_colour_EBC": float(spec["wort_colour_EBC"]),
+            }
+        )
 
     return {
         "silos": silos,
@@ -440,8 +448,20 @@ def _replace_db_seed_data(payload: dict[str, Any]) -> None:
                 mass = float(q.get("mass_kg", 0.0) or 0.0)
                 conn.execute(
                     """
-                    INSERT INTO incoming_queue (lot_id, supplier, mass_kg, remaining_mass_kg, is_fully_consumed)
-                    VALUES (%s, %s, %s, %s, %s)
+                    INSERT INTO incoming_queue (
+                        lot_id,
+                        supplier,
+                        mass_kg,
+                        remaining_mass_kg,
+                        is_fully_consumed,
+                        moisture_pct,
+                        fine_extract_db_pct,
+                        wort_pH,
+                        diastatic_power_WK,
+                        total_protein_pct,
+                        wort_colour_EBC
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     """,
                     (
                         str(q.get("lot_id", "")),
@@ -449,6 +469,12 @@ def _replace_db_seed_data(payload: dict[str, Any]) -> None:
                         mass,
                         mass,
                         False,
+                        float(q.get("moisture_pct", 0.0) or 0.0),
+                        float(q.get("fine_extract_db_pct", 0.0) or 0.0),
+                        float(q.get("wort_pH", 0.0) or 0.0),
+                        float(q.get("diastatic_power_WK", 0.0) or 0.0),
+                        float(q.get("total_protein_pct", 0.0) or 0.0),
+                        float(q.get("wort_colour_EBC", 0.0) or 0.0),
                     ),
                 )
 
@@ -865,6 +891,12 @@ def _normalize_discharge_to_target(
 
 def create_app() -> FastAPI:
     app = FastAPI(title="DEM Simulation API", version="0.1.0")
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
     ui_dir = Path(__file__).resolve().parent / "ui"
     app.mount("/ui", StaticFiles(directory=ui_dir), name="ui")
 
@@ -1330,6 +1362,7 @@ def create_app() -> FastAPI:
 
     @app.post("/api/optimize")
     def optimize(req: OptimizeRequest) -> dict[str, Any]:
+        started_at = time.perf_counter()
         inputs = {
             "silos": pd.DataFrame(req.silos),
             "layers": pd.DataFrame(req.layers),
@@ -1446,17 +1479,38 @@ def create_app() -> FastAPI:
             "target_params": req.target_params,
             "fixed_discharge_target_kg": FIXED_DISCHARGE_TARGET_KG,
             "iterations": req.iterations,
+            "iterations_effective": total_iter,
+            "explore_iterations": explore_iters,
+            "exploit_iterations": exploit_iters,
             "objective_method": "normalized_weighted_l2_hybrid_search",
             "param_ranges": DEFAULT_PARAM_RANGES,
             "top_candidates": top_candidates,
+            "config_used": {
+                "rho_bulk_kg_m3": float(cfg.rho_bulk_kg_m3),
+                "grain_diameter_m": float(cfg.grain_diameter_m),
+                "beverloo_c": float(cfg.beverloo_c),
+                "beverloo_k": float(cfg.beverloo_k),
+                "gravity_m_s2": float(cfg.gravity_m_s2),
+                "sigma_m": float(cfg.sigma_m),
+                "steps": int(cfg.steps),
+                "auto_adjust": bool(cfg.auto_adjust),
+            },
         }
+        out["elapsed_ms"] = round((time.perf_counter() - started_at) * 1000.0, 2)
         sim_event_id = _write_sim_event(
             event_type="optimize",
             action="optimize",
             total_discharged_mass_kg=float(out.get("best_run", {}).get("total_discharged_mass_kg", 0.0)),
             total_remaining_mass_kg=float(out.get("best_run", {}).get("total_remaining_mass_kg", 0.0)),
             objective_score=float(out.get("objective_score", 0.0)),
-            meta={"source": "api_optimize"},
+            meta={
+                "source": "api_optimize",
+                "elapsed_ms": out.get("elapsed_ms"),
+                "iterations_effective": total_iter,
+                "explore_iterations": explore_iters,
+                "exploit_iterations": exploit_iters,
+                "steps": int(cfg.steps),
+            },
         )
         try:
             execute(
