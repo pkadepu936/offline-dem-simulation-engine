@@ -678,6 +678,43 @@ function renderContributionBars(result) {
     .join("");
 }
 
+function renderFeasibilityWarnings(warnings) {
+  // Find or create the warning banner container just above the opt output.
+  let bannerEl = document.getElementById("feasibilityWarningBanner");
+  if (!bannerEl) {
+    bannerEl = document.createElement("div");
+    bannerEl.id = "feasibilityWarningBanner";
+    bannerEl.style.cssText =
+      "margin:8px 0;padding:10px 14px;border-radius:6px;font-size:13px;line-height:1.55;display:none;";
+    if (optOutEl && optOutEl.parentNode) {
+      optOutEl.parentNode.insertBefore(bannerEl, optOutEl);
+    }
+  }
+
+  if (!warnings || warnings.length === 0) {
+    bannerEl.style.display = "none";
+    bannerEl.innerHTML = "";
+    return;
+  }
+
+  const rows = warnings
+    .map(
+      (w) =>
+        `<li>⚠ <strong>${w.param}</strong>: target <strong>${w.target}</strong> is ${w.direction} achievable range ` +
+        `[<strong>${w.achievable_min}</strong> – <strong>${w.achievable_max}</strong>]</li>`
+    )
+    .join("");
+
+  bannerEl.style.cssText =
+    "margin:8px 0;padding:10px 14px;border-radius:6px;font-size:13px;line-height:1.55;" +
+    "background:#fef3c7;border:1.5px solid #f59e0b;color:#92400e;display:block;";
+  bannerEl.innerHTML =
+    `<strong>⚠ Inventory Feasibility Warnings (${warnings.length})</strong>` +
+    `<p style="margin:4px 0 6px">The following target parameters cannot be reached with the current silo inventory. ` +
+    `The optimizer will return the closest achievable blend.</p>` +
+    `<ul style="margin:0;padding-left:18px">${rows}</ul>`;
+}
+
 function renderCandidateTable(payload, options = {}) {
   const targetWrapEl = options.targetWrapEl || candidateTableWrapEl;
   const sortSelectEl = options.sortSelectEl || candidateSortEl;
@@ -941,6 +978,7 @@ async function optimizeBlend() {
     }
     // Optimization is advisory only; do not mutate current fill-state visuals.
     lastOptimizeContext = { mode: "studio", scheduleId: "", brewId: "" };
+    renderFeasibilityWarnings(data.feasibility_warnings || []);
     renderCandidateTable(data, lastOptimizeContext);
     lastOptimizePayload = data;
 
@@ -959,6 +997,7 @@ async function optimizeBlend() {
     setStepState(stepOptimize, statusOptimize, "is-success", "Complete");
     if (optimizeBtn) optimizeBtn.disabled = false;
   } catch (e) {
+    renderFeasibilityWarnings([]);
     if (optOutEl) optOutEl.textContent = String(e);
     setStepState(stepOptimize, statusOptimize, "is-warning", "Failed");
     printRaw(`Optimization error: ${String(e)}`);

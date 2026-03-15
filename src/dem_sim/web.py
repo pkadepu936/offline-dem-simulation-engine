@@ -899,6 +899,78 @@ def _clip_fraction(v: float) -> float:
     return max(DISCHARGE_FRACTION_MIN, min(DISCHARGE_FRACTION_MAX, float(v)))
 
 
+def _compute_feasibility_warnings(
+    layers_df: pd.DataFrame,
+    suppliers_df: pd.DataFrame,
+    target_params: dict[str, float],
+) -> list[dict[str, Any]]:
+    """Compute per-parameter achievable ranges from current inventory and flag targets outside them.
+
+    Each layer carries the COA of its supplier.  The achievable range for a
+    blended parameter is [min(supplier_value), max(supplier_value)] across all
+    layers that still have positive mass — a perfect blend can only be inside
+    that convex hull.
+    """
+    coa_cols = [
+        "moisture_pct",
+        "fine_extract_db_pct",
+        "wort_pH",
+        "diastatic_power_WK",
+        "total_protein_pct",
+        "wort_colour_EBC",
+    ]
+    if layers_df.empty or suppliers_df.empty:
+        return []
+
+    # Keep only layers with positive remaining mass.
+    mass_col = "segment_mass_kg" if "segment_mass_kg" in layers_df.columns else None
+    if mass_col:
+        active_layers = layers_df[layers_df[mass_col].astype(float) > 1e-6].copy()
+    else:
+        active_layers = layers_df.copy()
+
+    if active_layers.empty:
+        return []
+
+    # Join layers → suppliers on the "supplier" column.
+    if "supplier" not in active_layers.columns or "supplier" not in suppliers_df.columns:
+        return []
+
+    merged = active_layers.merge(
+        suppliers_df[["supplier"] + [c for c in coa_cols if c in suppliers_df.columns]],
+        on="supplier",
+        how="left",
+    )
+
+    warnings: list[dict[str, Any]] = []
+    for param, target_val in target_params.items():
+        if param not in merged.columns:
+            continue
+        col_vals = merged[param].dropna().astype(float)
+        if col_vals.empty:
+            continue
+        lo = float(col_vals.min())
+        hi = float(col_vals.max())
+        target_val_f = float(target_val)
+        if target_val_f < lo - 1e-9 or target_val_f > hi + 1e-9:
+            direction = "below" if target_val_f < lo else "above"
+            warnings.append(
+                {
+                    "param": param,
+                    "target": round(target_val_f, 4),
+                    "achievable_min": round(lo, 4),
+                    "achievable_max": round(hi, 4),
+                    "direction": direction,
+                    "message": (
+                        f"{param}: target {target_val_f:.4g} is {direction} the achievable "
+                        f"inventory range [{lo:.4g} – {hi:.4g}]"
+                    ),
+                }
+            )
+
+    return warnings
+
+
 def _candidate_rows_from_fractions(
     silo_ids: list[str], fractions: list[float]
 ) -> list[dict[str, Any]]:
@@ -1487,6 +1559,12 @@ def create_app() -> FastAPI:
         cfg = RunConfig(**req.config)
         silos_df = inputs["silos"].copy()
         layers_df = inputs["layers"].copy()
+        suppliers_df = inputs["suppliers"].copy()
+        feasibility_warnings = _compute_feasibility_warnings(
+            layers_df=layers_df,
+            suppliers_df=suppliers_df,
+            target_params=req.target_params,
+        )
         available_by_silo = _available_mass_by_silo(layers_df)
         available_total = float(sum(available_by_silo.values()))
         if available_total + 1e-12 < FIXED_DISCHARGE_TARGET_KG:
@@ -1593,6 +1671,7 @@ def create_app() -> FastAPI:
             "recommended_discharge": best_discharge,
             "best_run": _result_to_api_payload(best_result),
             "target_params": req.target_params,
+            "feasibility_warnings": feasibility_warnings,
             "fixed_discharge_target_kg": FIXED_DISCHARGE_TARGET_KG,
             "iterations": req.iterations,
             "iterations_effective": total_iter,
