@@ -808,6 +808,7 @@ async function validatePayload() {
 
 async function runSimulation() {
   if (isRunning) return;
+  if (!validatePayloadContents()) return;
   try {
     isRunning = true;
     runBtn.disabled = true;
@@ -906,6 +907,7 @@ function targetParamsFromUI() {
 
 async function optimizeBlend() {
   if (isOptimizing) return;
+  if (!validateGroup(OPT_FIELDS)) return;
   try {
     if (!optOutEl) {
       throw new Error("UI element #optOut not found.");
@@ -972,6 +974,7 @@ async function optimizeBlend() {
 
 async function generateRandomScheduleData() {
   if (!schedGenerateRandomBtn) return;
+  if (!validateGroup(SCHED_RANDOM_FIELDS)) return;
   try {
     schedGenerateRandomBtn.disabled = true;
     schedGenerateRandomBtn.textContent = "Generating...";
@@ -1017,6 +1020,7 @@ async function generateRandomScheduleData() {
 
 async function generateSchedulePlan() {
   if (!schedGenerateScheduleBtn) return;
+  if (!validateGroup(SCHED_PLAN_FIELDS)) return;
   try {
     schedGenerateScheduleBtn.disabled = true;
     schedGenerateScheduleBtn.textContent = "Generating...";
@@ -1297,6 +1301,152 @@ async function applyScheduleCandidateDischarge(scheduleId, brewId, candidateInde
   }
   printScheduleDebug(schedOptimizationOutEl, data);
 }
+
+// ── Front-end validation ─────────────────────────────────────────────────────
+//
+// FIELD_RULES defines min/max (and optional integer flag) for every validated
+// input. showFieldError / clearFieldError inject/remove a <span> underneath
+// the input and toggle field-invalid / field-valid CSS classes.
+// validateGroup() runs a list of rule ids and returns true only if all pass.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const FIELD_RULES = {
+  // Optimization workbench — COA targets
+  t_moisture_pct:        { label: "Moisture %",           min: 3.0,  max: 12.0  },
+  t_fine_extract_db_pct: { label: "Fine Extract db%",     min: 78.0, max: 85.0  },
+  t_wort_pH:             { label: "Wort pH",              min: 5.5,  max: 6.2   },
+  t_diastatic_power_WK:  { label: "Diastatic Power (WK)", min: 200,  max: 500   },
+  t_total_protein_pct:   { label: "Total Protein %",      min: 8.0,  max: 14.0  },
+  t_wort_colour_EBC:     { label: "Wort Colour (EBC)",    min: 2.0,  max: 8.0   },
+  opt_iterations:        { label: "Iterations",           min: 1,    max: 2000, integer: true },
+  opt_seed:              { label: "Seed",                 min: 0,    max: 999999, integer: true },
+  // Schedule — generate random
+  sched_silos_count:     { label: "Silos Count",          min: 1,    max: 10,   integer: true },
+  sched_lots_count:      { label: "Lots Count",           min: 1,    max: 1000, integer: true },
+  sched_lot_size_kg:     { label: "Lot Size (kg)",        min: 1,    max: 50000 },
+  // Schedule — generate plan
+  sched_brews_count:     { label: "Brews Count",          min: 1,    max: 50,   integer: true },
+};
+
+function _errSpanId(fieldId) { return `__verr_${fieldId}`; }
+
+function showFieldError(fieldId, message) {
+  const el = document.getElementById(fieldId);
+  if (!el) return;
+  el.classList.add("field-invalid");
+  el.classList.remove("field-valid");
+  let span = document.getElementById(_errSpanId(fieldId));
+  if (!span) {
+    span = document.createElement("span");
+    span.id = _errSpanId(fieldId);
+    span.className = "field-error-msg";
+    span.setAttribute("role", "alert");
+    el.parentNode.appendChild(span);
+  }
+  span.textContent = message;
+}
+
+function clearFieldError(fieldId) {
+  const el = document.getElementById(fieldId);
+  if (!el) return;
+  el.classList.remove("field-invalid");
+  el.classList.add("field-valid");
+  const span = document.getElementById(_errSpanId(fieldId));
+  if (span) span.textContent = "";
+}
+
+function validateOneField(fieldId) {
+  const rule = FIELD_RULES[fieldId];
+  if (!rule) return true;
+  const el = document.getElementById(fieldId);
+  if (!el) return true;
+  const raw = el.value.trim();
+  if (raw === "") {
+    showFieldError(fieldId, `${rule.label} is required.`);
+    return false;
+  }
+  const val = Number(raw);
+  if (Number.isNaN(val)) {
+    showFieldError(fieldId, `${rule.label} must be a number.`);
+    return false;
+  }
+  if (rule.integer && !Number.isInteger(val)) {
+    showFieldError(fieldId, `${rule.label} must be a whole number.`);
+    return false;
+  }
+  if (val < rule.min || val > rule.max) {
+    showFieldError(fieldId, `${rule.label}: enter a value between ${rule.min} and ${rule.max}.`);
+    return false;
+  }
+  clearFieldError(fieldId);
+  return true;
+}
+
+function validateGroup(fieldIds) {
+  let ok = true;
+  for (const id of fieldIds) {
+    if (!validateOneField(id)) ok = false;
+  }
+  return ok;
+}
+
+const OPT_FIELDS = [
+  "t_moisture_pct", "t_fine_extract_db_pct", "t_wort_pH",
+  "t_diastatic_power_WK", "t_total_protein_pct", "t_wort_colour_EBC",
+  "opt_iterations", "opt_seed",
+];
+const SCHED_RANDOM_FIELDS = ["sched_silos_count", "sched_lots_count", "sched_lot_size_kg"];
+const SCHED_PLAN_FIELDS   = ["sched_brews_count"];
+
+function validatePayloadContents() {
+  const raw = payloadEl ? payloadEl.value.trim() : "";
+  const showErr = (msg) => {
+    if (payloadEl) { payloadEl.classList.add("field-invalid"); payloadEl.classList.remove("field-valid"); }
+    if (runStatusEl) { runStatusEl.className = "run-status error"; runStatusEl.textContent = msg; }
+  };
+  if (!raw) {
+    showErr("Payload is empty. Load sample data or enter a valid JSON payload first.");
+    return false;
+  }
+  let parsed;
+  try { parsed = JSON.parse(raw); } catch (_) {
+    showErr("Payload is not valid JSON. Fix the syntax before running.");
+    return false;
+  }
+  const missing = ["silos", "layers", "suppliers", "discharge"].filter((k) => !(k in parsed));
+  if (missing.length) {
+    showErr(`Payload missing required keys: ${missing.join(", ")}.`);
+    return false;
+  }
+  const badFracs = (Array.isArray(parsed.discharge) ? parsed.discharge : []).filter((d) => {
+    const f = Number(d.discharge_fraction);
+    return !Number.isNaN(f) && (f < 0 || f > 1);
+  });
+  if (badFracs.length) {
+    showErr(`Discharge fractions must be between 0 and 1. Check: ${badFracs.map((d) => d.silo_id).join(", ")}.`);
+    return false;
+  }
+  if (payloadEl) { payloadEl.classList.remove("field-invalid"); payloadEl.classList.add("field-valid"); }
+  return true;
+}
+
+// Attach blur listeners so errors appear as soon as the user tabs away.
+function _attachBlurValidation(fieldIds) {
+  for (const id of fieldIds) {
+    const el = document.getElementById(id);
+    if (el) el.addEventListener("blur", () => validateOneField(id));
+  }
+}
+_attachBlurValidation([...OPT_FIELDS, ...SCHED_RANDOM_FIELDS, ...SCHED_PLAN_FIELDS]);
+
+// Validate payload textarea on blur (only when it already has content).
+if (payloadEl) {
+  payloadEl.addEventListener("blur", () => {
+    if (payloadEl.value.trim()) validatePayloadContents();
+  });
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 
 document.getElementById("validateBtn").addEventListener("click", validatePayload);
 document.getElementById("runBtn").addEventListener("click", runSimulation);
